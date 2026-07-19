@@ -20,7 +20,7 @@ def main(argv: list[str] | None = None) -> int:
         "--range",
         dest="rev_range",
         default="HEAD^..HEAD",
-        help="Git revision range to diff, for example HEAD^..HEAD or main..HEAD.",
+        help="Git revision range to diff, for example HEAD^..HEAD or BASE..HEAD.",
     )
     parser.add_argument("--diff-file", help="Read unified git diff from this file instead of running git.")
     parser.add_argument("--comments", help="JSON file with file-level and inline review comments.")

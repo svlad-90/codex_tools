@@ -1483,7 +1483,8 @@ def _remap_compile_path(path: Path, compile_commands: Path, directory: Path | No
         return (directory / path) if directory else path
 
     build_dir = compile_commands.parent.resolve()
-    raw_build_dir = Path("/home/builder/workspace") / build_dir.parent.name / build_dir.name
+    raw_root = Path(os.environ.get("CODEX_CPP_CODE_MAP_RAW_WORKSPACE", "/workspace"))
+    raw_build_dir = raw_root / build_dir.parent.name / build_dir.name
     raw_workspace = raw_build_dir.parents[1]
     host_workspace = build_dir.parents[1]
 
