@@ -14,8 +14,8 @@ Current rule files:
 
 ## Task layout
 
-Every task in this workspace must live in its own top-level directory under
-`new_dev`. Each task directory must use this layout:
+Every task in this workspace must live in its own top-level directory under the
+workspace root. Each task directory must use this layout:
 
 - `TASK_CONTEXT.md` - active task context, decisions, branches, repositories,
   validation status, discovered constraints, and remaining work.

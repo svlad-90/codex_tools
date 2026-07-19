@@ -125,14 +125,14 @@ runner script for reproducing GitHub Actions workflows locally.
 Use this repository as the root of a Codex workspace:
 
 ```sh
-git clone https://github.com/svlad-90/codex_tools.git new_dev
-cd new_dev
+git clone git@github.com:svlad-90/codex_tools.git codex-workspace
+cd codex-workspace
 ```
 
 Then create task directories next to `codex_tools/`:
 
 ```text
-new_dev/
+codex-workspace/
   AGENTS.md
   codex_tools/
   some-task/
