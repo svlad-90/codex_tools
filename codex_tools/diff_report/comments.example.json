@@ -1,0 +1,14 @@
+{
+  "summary": "Optional plain-text summary shown above the diff.",
+  "files": {
+    "path/to/file.py": "File-level review note shown under the file header."
+  },
+  "inline": [
+    {
+      "file": "path/to/file.py",
+      "line": 42,
+      "title": "Review comment",
+      "body": "Inline review note shown under the target new-file line."
+    }
+  ]
+}
