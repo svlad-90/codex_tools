@@ -1,0 +1,4 @@
+interface:
+  display_name: "Commit Message Format"
+  short_description: "Format reviewed git commit messages"
+  default_prompt: "Use $commit-message-format to draft or rewrite commit messages with workspace formatting rules."
