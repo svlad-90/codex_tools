@@ -10,7 +10,14 @@ Current rule files:
 
 - `codex_tools/rules/python-code.md`
 - `codex_tools/rules/cpp-code.md`
+- `codex_tools/rules/reusable-environments.md`
+- `codex_tools/rules/findings.md`
 - `codex_tools/rules/git-commits.md`
+- `codex_tools/rules/diff-reports.md`
+
+Workspace-local skills live under `codex_tools/skills/`. When a task matches a
+workspace-local skill, read that skill's `SKILL.md` before acting and follow it
+in addition to the rule files above.
 
 ## Task layout
 
@@ -37,6 +44,22 @@ Diff/review reports must be delivered as GitHub-style HTML generated with
 JSON used by the tool, and the source diff/patch under `report/diff/`.
 Markdown files may be used for short notes or navigation, but they are not a
 substitute for the HTML diff review report.
+
+Comments in diff reports, diagrams, and explanatory notes must be written for a
+reader with strong application, middleware, and architecture experience but
+limited systems-programming background. For low-level topics such as memory
+copying, bit operations, assembly, Xen, Zephyr, U-Boot, boot flows, MMIO,
+interrupts, PFNs/GFNs, page tables, cache flushes, and hypercalls, do not rely
+on terse systems shorthand. Introduce each new term in plain language, state
+what problem the step solves, explain what would break if the step were absent,
+and only then name the exact variable, register, constant, or API. When several
+low-level terms are involved, repeat the role of each term locally instead of
+assuming the reader remembers it from earlier comments.
+
+When updating an existing diff/review report for the same task or review scope,
+replace the old artifacts instead of keeping stale alternatives. Remove any
+superseded HTML, JSON, diff, or patch files for the old version once the new
+report has been generated and verified.
 
 Before working inside a task directory, read that task's `TASK_CONTEXT.md` and
 keep it updated as the task progresses.

@@ -15,3 +15,15 @@ These rules apply to every repository under the workspace root.
    lines that create empty paragraphs.
 4. Put trailers in a separate trailer block: add one blank line before
    `Signed-off-by`.
+5. When drafting, rewriting, or amending commit messages, prefer the workspace
+   formatter before committing:
+
+   ```sh
+   python -m codex_tools.commit_msg --repo path/to/repo draft-message.txt \
+     --output formatted-message.txt --check
+   git -C path/to/repo commit -F formatted-message.txt
+   ```
+
+   The formatter wraps body paragraphs to 72 columns and adds the
+   `Signed-off-by` trailer from the target repository's `git config`
+   `user.name` and `user.email`.
