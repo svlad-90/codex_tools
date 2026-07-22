@@ -27,6 +27,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", help="HTML report output path.")
     parser.add_argument("--title", default="PR Diff Review", help="Report title.")
     parser.add_argument("--context", type=int, default=80, help="Git diff context lines.")
+    parser.add_argument(
+        "--refresh-targets",
+        action="store_true",
+        help=(
+            "Refresh target anchors in the same-basename comments JSON before "
+            "rendering self-contained HTML."
+        ),
+    )
+    parser.add_argument(
+        "--display-label",
+        help="Human-facing diff source label, for example 'Commit 01'.",
+    )
     parser.add_argument("--help-compact", action="store_true", help="Print compact CLI synopsis.")
 
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
@@ -49,6 +61,8 @@ def main(argv: list[str] | None = None) -> int:
             diff_file=diff_file,
             comments_file=comments_file,
             context=args.context,
+            display_label=args.display_label,
+            refresh_targets=args.refresh_targets,
         )
         print(str(output))
         return 0
