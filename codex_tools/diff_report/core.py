@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import html
 import json
 import re
@@ -1393,13 +1394,19 @@ def _render_diagram_preview(
     safe_id = _anchor(diagram.diagram_id)
     focus_attr = _focus_attr("data-diagram-focus", focus_terms)
     notes_attr = _json_attr("data-diagram-notes", notes)
+    preview_src = _svg_data_uri(diagram.svg)
     return (
         '<button type="button" class="diagram-preview" '
         f'data-diagram-id="{_esc(safe_id)}"{focus_attr}{notes_attr} aria-label="Open diagram: {_esc(diagram.title)}">'
         f'<span class="diagram-preview-title">{_esc(diagram.title)}</span>'
-        f'<span class="diagram-preview-canvas">{diagram.svg}</span>'
+        f'<span class="diagram-preview-canvas"><img src="{_esc(preview_src)}" alt=""></span>'
         "</button>\n"
     )
+
+
+def _svg_data_uri(svg: str) -> str:
+    encoded = base64.b64encode(svg.encode("utf-8")).decode("ascii")
+    return f"data:image/svg+xml;base64,{encoded}"
 
 
 def _render_log_preview(log: LogAttachment, focus_terms: tuple[str, ...] = ()) -> str:
@@ -1770,6 +1777,7 @@ def _html_header(title: str) -> str:
     .diagram-preview:hover {{ border-color: var(--link); box-shadow: 0 0 0 2px rgba(9,105,218,.12); }}
     .diagram-preview-title {{ display: block; padding: 7px 9px; border-bottom: 1px solid var(--border); background: var(--header-bg); font-weight: 700; }}
     .diagram-preview-canvas {{ display: flex; align-items: center; justify-content: center; height: 180px; padding: 10px; overflow: hidden; background: var(--diagram-bg); }}
+    .diagram-preview-canvas img {{ display: block; max-width: 100%; max-height: 100%; width: auto; height: auto; }}
     .diagram-preview-canvas svg {{ max-width: 100%; max-height: 100%; width: auto; height: auto; filter: var(--diagram-svg-filter); }}
     .log-preview {{ cursor: pointer; }}
     .log-preview-text {{ max-width: 100%; height: 180px; margin: 0; padding: 10px; overflow: hidden; background: #0d1117; color: #e6edf3; font: 18px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; text-align: left; }}
