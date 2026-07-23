@@ -72,5 +72,12 @@ tasks when a script would add more overhead than value.
 
 Follow `codex_tools/rules/git-commits.md` for commit message formatting.
 
+## File references
+
+When pointing the user to local files, provide a console-friendly absolute
+`path:line` reference in addition to any Markdown link when a specific line is
+useful. The plain path must be copyable from the terminal and should not use
+`file://`, editor-specific URI schemes, or relative paths.
+
 Workspace infrastructure such as `.git`, `.agents`, `.codex`, and
 `codex_tools/` stays at the workspace root and is not a task.

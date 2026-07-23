@@ -1,5 +1,29 @@
 {
   "summary": "Optional plain-text summary shown above the diff.",
+  "summary_blocks": [
+    {
+      "type": "text",
+      "body": "Optional evidence-led summary paragraph."
+    },
+    {
+      "type": "diagram",
+      "diagram": "optional-diagram-id",
+      "diagram_focus": [
+        "SVG arrow label text"
+      ]
+    },
+    {
+      "type": "text",
+      "body": "Optional paragraph explaining what the validation artifact proves."
+    },
+    {
+      "type": "log",
+      "log": "optional-log-id",
+      "log_focus": [
+        "PASS"
+      ]
+    }
+  ],
   "files": {
     "path/to/file.py": "File-level review note shown under the file header."
   },
@@ -31,6 +55,12 @@
           }
         }
       ]
+    }
+  },
+  "logs": {
+    "optional-log-id": {
+      "title": "Runtime log",
+      "path": "../runtime/test.log"
     }
   },
   "story": [

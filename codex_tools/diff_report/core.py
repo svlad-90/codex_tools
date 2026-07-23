@@ -58,6 +58,17 @@ class StoryStep:
 
 
 @dataclass(frozen=True)
+class SummaryBlock:
+    kind: str
+    text: str | None = None
+    diagram: str | None = None
+    log: str | None = None
+    diagram_focus: tuple[str, ...] = ()
+    log_focus: tuple[str, ...] = ()
+    diagram_notes: tuple[dict[str, Any], ...] = ()
+
+
+@dataclass(frozen=True)
 class ReviewComments:
     file_comments: dict[str, str]
     inline_comments: dict[tuple[str, int], tuple[InlineComment, ...]]
@@ -70,6 +81,7 @@ class ReviewComments:
     file_log_focus: dict[str, tuple[str, ...]]
     file_diagram_notes: dict[str, tuple[dict[str, Any], ...]]
     summary: str | None = None
+    summary_blocks: tuple[SummaryBlock, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -172,11 +184,8 @@ def render_html_report(
   </header>
 """
     )
-    if comments.summary:
-        parts.append(
-            f'  <section><h2>Reviewer Summary</h2>'
-            f'<p class="review-summary">{_esc(comments.summary)}</p></section>\n'
-        )
+    if comments.summary or comments.summary_blocks:
+        parts.append(_render_summary_section(comments))
     if source.message:
         parts.append(
             f'  <section><h2>Commit Message</h2>'
@@ -196,12 +205,36 @@ def render_html_report(
     if comments.story:
         parts.append(_story_script())
     parts.append(_theme_script())
-    parts.append('</main>\n<div class="scroll-spacer" aria-hidden="true"></div>\n</body>\n</html>\n')
+    parts.append("</main>\n</body>\n</html>\n")
     return "".join(parts)
 
 
 def _comment_count(comments: ReviewComments) -> int:
     return len(comments.file_comments) + sum(len(items) for items in comments.inline_comments.values())
+
+
+def _render_summary_section(comments: ReviewComments) -> str:
+    parts = ['  <section><h2>Reviewer Summary</h2><div class="review-summary-blocks">\n']
+    if comments.summary_blocks:
+        for block in comments.summary_blocks:
+            if block.kind == "text":
+                parts.append(f'    <p class="review-summary">{_esc(block.text or "")}</p>\n')
+            elif block.kind == "diagram":
+                parts.append(
+                    '    <div class="summary-artifact-preview">'
+                    f'{_render_comment_diagram(comments, block.diagram, block.diagram_focus, block.diagram_notes)}'
+                    "</div>\n"
+                )
+            elif block.kind == "log":
+                parts.append(
+                    '    <div class="summary-artifact-preview">'
+                    f'{_render_comment_log(comments, block.log, block.log_focus)}'
+                    "</div>\n"
+                )
+    elif comments.summary:
+        parts.append(f'    <p class="review-summary">{_esc(comments.summary)}</p>\n')
+    parts.append("  </div></section>\n")
+    return "".join(parts)
 
 
 def _render_comments_index(comments: ReviewComments, diff_file_order: list[str]) -> str:
@@ -492,6 +525,7 @@ def _comments_from_payload(
         if log not in logs:
             raise DiffReportError(f"unknown log referenced by file comment {file_path}: {log}")
     story = _story_from_payload(payload, diagrams=diagrams, logs=logs)
+    summary_blocks = _summary_blocks_from_payload(payload, diagrams=diagrams, logs=logs)
     return ReviewComments(
         file_comments=file_comments,
         inline_comments={key: tuple(value) for key, value in grouped.items()},
@@ -504,7 +538,67 @@ def _comments_from_payload(
         file_log_focus=file_log_focus,
         file_diagram_notes=file_diagram_notes,
         summary=str(payload["summary"]) if "summary" in payload else None,
+        summary_blocks=summary_blocks,
     )
+
+
+def _summary_blocks_from_payload(
+    payload: dict[str, Any],
+    *,
+    diagrams: dict[str, Diagram],
+    logs: dict[str, LogAttachment],
+) -> tuple[SummaryBlock, ...]:
+    raw_blocks = payload.get("summary_blocks")
+    if raw_blocks is None:
+        return ()
+    if not isinstance(raw_blocks, list):
+        raise DiffReportError("comments.summary_blocks must be a list")
+    blocks: list[SummaryBlock] = []
+    for index, item in enumerate(raw_blocks):
+        if isinstance(item, str):
+            blocks.append(SummaryBlock(kind="text", text=item))
+            continue
+        if not isinstance(item, dict):
+            raise DiffReportError("comments.summary_blocks entries must be strings or objects")
+        block_type = str(item.get("type", "")).strip().lower()
+        if not block_type:
+            if "diagram" in item:
+                block_type = "diagram"
+            elif "log" in item:
+                block_type = "log"
+            else:
+                block_type = "text"
+        if block_type in {"text", "paragraph"}:
+            text = item.get("body", item.get("text", ""))
+            blocks.append(SummaryBlock(kind="text", text=str(text)))
+            continue
+        if block_type == "diagram":
+            diagram = str(_required(item, "diagram"))
+            if diagram not in diagrams:
+                raise DiffReportError(f"unknown diagram referenced by summary block {index}: {diagram}")
+            blocks.append(
+                SummaryBlock(
+                    kind="diagram",
+                    diagram=diagram,
+                    diagram_focus=_focus_terms(item.get("diagram_focus", ()), field="diagram_focus"),
+                    diagram_notes=_diagram_notes(item.get("diagram_notes", ())),
+                )
+            )
+            continue
+        if block_type == "log":
+            log = str(_required(item, "log"))
+            if log not in logs:
+                raise DiffReportError(f"unknown log referenced by summary block {index}: {log}")
+            blocks.append(
+                SummaryBlock(
+                    kind="log",
+                    log=log,
+                    log_focus=_focus_terms(item.get("log_focus", ()), field="log_focus"),
+                )
+            )
+            continue
+        raise DiffReportError(f"unknown summary block type at index {index}: {block_type}")
+    return tuple(blocks)
 
 
 def _story_from_payload(
@@ -1327,6 +1421,12 @@ def _html_header(title: str) -> str:
       --hunk-bg: #e5f1fb;
       --comment-bg: #fff4ce;
       --comment-border: #ca5010;
+      --comment-target-bg: #fff8dc;
+      --comment-target-mix: rgba(255,244,206,.58);
+      --comment-row-bg: rgba(255,248,220,.82);
+      --comment-title-bg: rgba(255,255,255,.44);
+      --comment-title-border: rgba(202,80,16,.34);
+      --comment-panel-border: rgba(202,80,16,.55);
       --code-bg: #f8f8f8;
       --brand-panel: rgba(255,255,255,.9);
       --brand-text: #1f1f1f;
@@ -1335,10 +1435,21 @@ def _html_header(title: str) -> str:
       --diagram-code-context-bg: rgba(255,244,206,.46);
       --diagram-code-target-bg: rgba(255,232,166,.9);
       --diagram-code-target-border: #ca5010;
+      --diagram-code-file: #0969da;
+      --diagram-focus: #1d4ed8;
       --diagram-link: #107c10;
       --diagram-link-bg: #e9f5e9;
       --diagram-link-hover-bg: #deecf9;
       --diagram-svg-filter: none;
+      --diagram-svg-text: #111827;
+      --diagram-svg-line: #475569;
+      --diagram-svg-box-bg: #ffffff;
+      --diagram-svg-note-bg: #fff8c5;
+      --diagram-note-bg: #dbeafe;
+      --diagram-note-hover-bg: #bfdbfe;
+      --diagram-note-text: #111827;
+      --diagram-note-link: #2563eb;
+      --diagram-note-marker-bg: #eff6ff;
       --overlay-bg: rgba(31,35,40,.42);
       --nav-width: 430px;
       --left-chrome-x: 42px;
@@ -1365,6 +1476,12 @@ def _html_header(title: str) -> str:
       --hunk-bg: #063b49;
       --comment-bg: #3a3217;
       --comment-border: #cca700;
+      --comment-target-bg: #2f2a1d;
+      --comment-target-mix: rgba(204,167,0,.22);
+      --comment-row-bg: rgba(58,50,23,.62);
+      --comment-title-bg: rgba(255,255,255,.06);
+      --comment-title-border: rgba(204,167,0,.34);
+      --comment-panel-border: rgba(204,167,0,.55);
       --code-bg: #1e1e1e;
       --brand-panel: rgba(37,37,38,.94);
       --brand-text: #d4d4d4;
@@ -1373,10 +1490,21 @@ def _html_header(title: str) -> str:
       --diagram-code-context-bg: rgba(55,65,81,.55);
       --diagram-code-target-bg: rgba(14,99,156,.5);
       --diagram-code-target-border: #3794ff;
+      --diagram-code-file: #9cdcfe;
+      --diagram-focus: #9cdcfe;
       --diagram-link: #4ec9b0;
       --diagram-link-bg: #173f3a;
       --diagram-link-hover-bg: #094771;
-      --diagram-svg-filter: invert(1) hue-rotate(180deg) saturate(.88) brightness(1.08);
+      --diagram-svg-filter: none;
+      --diagram-svg-text: #d4d4d4;
+      --diagram-svg-line: #c5c5c5;
+      --diagram-svg-box-bg: #252526;
+      --diagram-svg-note-bg: #3a3217;
+      --diagram-note-bg: #1f2f46;
+      --diagram-note-hover-bg: #094771;
+      --diagram-note-text: #d4d4d4;
+      --diagram-note-link: #3794ff;
+      --diagram-note-marker-bg: #173f5f;
       --overlay-bg: rgba(0,0,0,.68);
     }}
     * {{ box-sizing: border-box; }}
@@ -1390,7 +1518,6 @@ def _html_header(title: str) -> str:
     .report-brand-subtitle {{ color: var(--muted); font-size: 40px; white-space: nowrap; }}
     .theme-toggle {{ position: fixed; left: var(--left-chrome-x); top: max(214px, calc(var(--story-offset) - 56px)); z-index: 9; display: inline-flex; align-items: center; justify-content: center; width: var(--left-chrome-width); height: 44px; padding: 0 18px; border: 1px solid var(--border); border-radius: 999px; background: var(--button-bg); color: var(--link); box-shadow: 0 10px 28px var(--shadow); cursor: pointer; font: 800 18px/1 ui-monospace, SFMono-Regular, Consolas, monospace; }}
     .theme-toggle:hover {{ border-color: var(--link); box-shadow: 0 12px 32px rgba(9,105,218,.22); }}
-    .scroll-spacer {{ height: 200vh; }}
     header, section, .file {{ background: var(--panel); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 16px; }}
     .file {{ border-top: 0; }}
     header, section {{ padding: 20px; }}
@@ -1398,7 +1525,10 @@ def _html_header(title: str) -> str:
     h1 {{ font-size: 28px; }}
     h2 {{ font-size: 20px; }}
     p {{ margin: 0 0 10px; }}
+    .review-summary-blocks {{ display: grid; gap: 12px; }}
     .review-summary {{ white-space: pre-line; }}
+    .review-summary-blocks .review-summary {{ margin: 0; }}
+    .summary-artifact-preview .diagram-preview-wrap {{ margin-top: 0; }}
     .commit-message {{ margin: 0; padding: 12px; background: var(--code-bg); border-radius: 6px; white-space: pre-wrap; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }}
     code {{ background: rgba(175,184,193,.2); border-radius: 4px; padding: 1px 5px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }}
     pre.stat {{ margin: 10px 0 0; padding: 12px; background: var(--code-bg); border-radius: 6px; overflow-x: auto; }}
@@ -1419,8 +1549,9 @@ def _html_header(title: str) -> str:
     .review-nav-node:not(.is-open) > .review-nav-children, .review-nav-node:not(.is-open) > .review-nav-comments {{ display: none; }}
     .review-nav-row {{ display: grid; grid-template-columns: 1em minmax(0, 1fr); gap: 2px; align-items: baseline; min-width: 0; padding: 3px 4px; border-radius: 4px; font-weight: 700; line-height: 1.18; }}
     .review-nav-row:hover {{ background: var(--button-hover-bg); }}
-    .review-nav-file.is-current > .review-nav-row {{ background: var(--button-hover-bg); box-shadow: inset 4px 0 0 var(--link); }}
-    .review-nav-file.is-current > .review-nav-row .review-nav-label {{ color: var(--text); }}
+    .review-nav-file.is-current > .review-nav-row {{ background: color-mix(in srgb, var(--link) 18%, var(--panel)); box-shadow: inset 4px 0 0 var(--link); }}
+    .review-nav-file.is-current > .review-nav-row a {{ color: var(--link); text-decoration: underline; text-decoration-thickness: 1.5px; text-underline-offset: 3px; }}
+    .review-nav-file.is-current > .review-nav-row .review-nav-label {{ color: inherit; }}
     .review-nav-toggle {{ display: inline-flex; align-items: center; justify-content: center; width: 1em; height: 1.18em; padding: 0; border: 0; background: transparent; color: var(--muted); cursor: pointer; font: inherit; line-height: 1; }}
     .review-nav-toggle-spacer {{ display: inline-block; width: 1em; }}
     .review-nav-twist::before {{ content: ">"; display: inline-block; width: 1em; color: var(--muted); }}
@@ -1476,18 +1607,18 @@ def _html_header(title: str) -> str:
     tr.ctx .num, tr.ctx .code {{ background: var(--row-bg); }}
     tr.hunk .num, tr.hunk .code {{ background: var(--hunk-bg); color: #0969da; }}
     tr.header .num, tr.header .code {{ background: var(--header-bg); color: var(--muted); font-weight: 700; }}
-    tr.comment-target .num, tr.comment-target .code {{ background: #fffdf0; }}
-    tr.comment-target.add .num, tr.comment-target.add .code {{ background: linear-gradient(to right, rgba(255,248,197,.46), rgba(255,248,197,.46)), var(--add-bg); }}
+    tr.comment-target .num, tr.comment-target .code {{ background: var(--comment-target-bg); }}
+    tr.comment-target.add .num, tr.comment-target.add .code {{ background: linear-gradient(to right, var(--comment-target-mix), var(--comment-target-mix)), var(--add-bg); }}
     tr.comment-target .num:first-child {{ box-shadow: inset 4px 0 0 var(--comment-border); }}
     tr.comment-target-start .num, tr.comment-target-start .code {{ box-shadow: inset 0 1px 0 rgba(212,167,44,.55); }}
     tr.comment-target-end .num, tr.comment-target-end .code {{ box-shadow: inset 0 -1px 0 rgba(212,167,44,.35); }}
     tr.comment-target-start .num:first-child {{ box-shadow: inset 4px 0 0 var(--comment-border), inset 0 1px 0 rgba(212,167,44,.55); }}
     tr.comment-target-end .num:first-child {{ box-shadow: inset 4px 0 0 var(--comment-border), inset 0 -1px 0 rgba(212,167,44,.35); }}
     tr.comment-target-single .num:first-child {{ box-shadow: inset 4px 0 0 var(--comment-border), inset 0 1px 0 rgba(212,167,44,.55), inset 0 -1px 0 rgba(212,167,44,.35); }}
-    tr.comment-row td {{ background: linear-gradient(to right, rgba(255,253,240,.78) 0 112px, transparent 112px); padding: 0 !important; }}
-    .review-comment {{ position: relative; margin: 6px 18px 14px 112px; border: 1px solid rgba(212,167,44,.55); border-left-width: 4px; background: var(--comment-bg); border-radius: 6px; box-shadow: 0 1px 2px rgba(31,35,40,.08); overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
+    tr.comment-row td {{ background: linear-gradient(to right, var(--comment-row-bg) 0 112px, transparent 112px); padding: 0 !important; }}
+    .review-comment {{ position: relative; margin: 6px 18px 14px 112px; border: 1px solid var(--comment-panel-border); border-left-width: 4px; background: var(--comment-bg); border-radius: 6px; box-shadow: 0 1px 2px rgba(31,35,40,.08); overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
     .review-comment::before {{ content: ""; position: absolute; top: -7px; left: -4px; width: 4px; height: 7px; background: var(--comment-border); }}
-    .review-comment .title {{ padding: 8px 10px; font-weight: 700; border-bottom: 1px solid rgba(212,167,44,.35); background: rgba(255,255,255,.38); }}
+    .review-comment .title {{ padding: 8px 10px; font-weight: 700; border-bottom: 1px solid var(--comment-title-border); background: var(--comment-title-bg); }}
     .review-comment .body {{ padding: 9px 10px; }}
     .diagram-list {{ display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: flex-start; gap: 12px; }}
     .diagram-preview-wrap {{ margin-top: 10px; }}
@@ -1518,7 +1649,8 @@ def _html_header(title: str) -> str:
     .diagram-code-popover {{ width: min(50vw, calc(100% - 20px)); height: min(76vh, calc(100% - 20px)); border: 1px solid var(--border); border-radius: 8px; background: var(--panel); box-shadow: 0 12px 32px var(--shadow); overflow: hidden; display: flex; flex-direction: column; }}
     .diagram-code-overlay[hidden] {{ display: none; }}
     .diagram-code-popover-header {{ display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-bottom: 1px solid var(--border); background: var(--header-bg); }}
-    .diagram-code-popover-title {{ font-weight: 700; }}
+    .diagram-code-popover-title {{ display: grid; gap: 2px; min-width: 0; color: var(--text); font-weight: 800; }}
+    .diagram-code-popover-file {{ color: var(--diagram-code-file); font: 20px/1.35 ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; }}
     .diagram-code-popover-close {{ display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; padding: 0; border: 1px solid var(--border); border-radius: 6px; background: var(--button-bg); color: var(--text); cursor: pointer; font: inherit; line-height: 1; }}
     .diagram-code-popover-close:hover {{ border-color: var(--link); color: var(--link); }}
     .diagram-code-popover-body {{ flex: 1; min-height: 0; padding: 10px 12px; overflow: auto; }}
@@ -1533,41 +1665,62 @@ def _html_header(title: str) -> str:
     .diagram-scroll.is-panning, .diagram-scroll.is-panning .diagram-zoom-stage {{ cursor: grabbing; user-select: none; }}
     .diagram-zoom-stage {{ transform-origin: 0 0; width: max-content; min-width: 100%; }}
     .diagram-zoom-stage svg {{ display: block; max-width: none; height: auto; filter: var(--diagram-svg-filter); }}
+    :root[data-theme="dark"] .diagram-preview-canvas svg text:not(.diagram-note-text):not(.diagram-note-marker-text):not(.diagram-code-link-badge-text):not(.asset-focus-match):not(.asset-focus-related-hover),
+    :root[data-theme="dark"] .diagram-zoom-stage svg text:not(.diagram-note-text):not(.diagram-note-marker-text):not(.diagram-code-link-badge-text):not(.asset-focus-match):not(.asset-focus-related-hover),
+    :root[data-theme="dark"] .diagram-preview-canvas svg tspan:not(.diagram-note-text):not(.diagram-note-marker-text):not(.asset-focus-match):not(.asset-focus-related-hover),
+    :root[data-theme="dark"] .diagram-zoom-stage svg tspan:not(.diagram-note-text):not(.diagram-note-marker-text):not(.asset-focus-match):not(.asset-focus-related-hover) {{ fill: var(--diagram-svg-text) !important; }}
+    :root[data-theme="dark"] .diagram-preview-canvas svg line:not(.asset-focus-connector):not(.diagram-code-link-connector):not(.diagram-note-link),
+    :root[data-theme="dark"] .diagram-zoom-stage svg line:not(.asset-focus-connector):not(.diagram-code-link-connector):not(.diagram-note-link),
+    :root[data-theme="dark"] .diagram-preview-canvas svg path:not(.diagram-note-box):not(.diagram-note-link),
+    :root[data-theme="dark"] .diagram-zoom-stage svg path:not(.diagram-note-box):not(.diagram-note-link),
+    :root[data-theme="dark"] .diagram-preview-canvas svg polyline:not(.asset-focus-connector):not(.diagram-code-link-connector),
+    :root[data-theme="dark"] .diagram-zoom-stage svg polyline:not(.asset-focus-connector):not(.diagram-code-link-connector) {{ stroke: var(--diagram-svg-line) !important; }}
+    :root[data-theme="dark"] .diagram-preview-canvas svg polygon:not(.asset-focus-connector):not(.diagram-code-link-connector),
+    :root[data-theme="dark"] .diagram-zoom-stage svg polygon:not(.asset-focus-connector):not(.diagram-code-link-connector) {{ fill: var(--diagram-svg-line) !important; stroke: var(--diagram-svg-line) !important; }}
+    :root[data-theme="dark"] .diagram-preview-canvas svg rect:not(.diagram-note-box):not(.diagram-code-link-badge-box),
+    :root[data-theme="dark"] .diagram-zoom-stage svg rect:not(.diagram-note-box):not(.diagram-code-link-badge-box) {{ fill: var(--diagram-svg-box-bg) !important; stroke: var(--diagram-svg-line) !important; }}
+    :root[data-theme="dark"] .diagram-preview-canvas svg path[fill="#FBFB77"],
+    :root[data-theme="dark"] .diagram-zoom-stage svg path[fill="#FBFB77"] {{ fill: var(--diagram-svg-note-bg) !important; stroke: var(--comment-border) !important; }}
     .log-view-text {{ margin: 0; min-width: 100%; color: #e6edf3; background: #0d1117; padding: 14px; border-radius: 6px; font: 13.5px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }}
     .asset-focus-line {{ display: block; margin: 0 -4px; padding: 0 4px; background: rgba(255, 171, 112, .32); border-left: 3px solid #fb8500; }}
     mark.asset-search-match {{ background: #fff8c5; color: inherit; padding: 0 1px; border-radius: 2px; }}
     mark.asset-search-current {{ background: #ffab70; outline: 1px solid #fb8500; }}
-    svg .asset-focus-connector {{ stroke: #1d4ed8 !important; stroke-width: 3px !important; opacity: .95; filter: drop-shadow(0 0 2px rgba(255,255,255,.95)); }}
+    svg .asset-focus-connector {{ stroke: var(--diagram-focus) !important; stroke-width: 3px !important; opacity: .95; filter: drop-shadow(0 0 2px rgba(255,255,255,.95)); }}
     svg line.asset-focus-connector, svg path.asset-focus-connector, svg polyline.asset-focus-connector {{ stroke-dasharray: 10 7; animation: focus-dash-flow 1.1s linear infinite; }}
     svg line.asset-focus-connector-reverse, svg path.asset-focus-connector-reverse, svg polyline.asset-focus-connector-reverse {{ animation-name: focus-dash-flow-reverse; }}
-    svg polygon.asset-focus-connector {{ fill: #1d4ed8 !important; opacity: .95; filter: drop-shadow(0 0 2px rgba(255,255,255,.95)); animation: focus-arrow-pulse 1.1s ease-in-out infinite; }}
-    svg .asset-focus-match {{ fill: #1d4ed8; stroke: none; }}
+    svg polygon.asset-focus-connector {{ fill: var(--diagram-focus) !important; opacity: .95; filter: drop-shadow(0 0 2px rgba(255,255,255,.95)); animation: focus-arrow-pulse 1.1s ease-in-out infinite; }}
+    svg .asset-focus-match {{ fill: var(--diagram-focus) !important; stroke: none !important; }}
+    :root[data-theme="dark"] .diagram-preview-canvas svg text.asset-focus-match,
+    :root[data-theme="dark"] .diagram-zoom-stage svg text.asset-focus-match,
+    :root[data-theme="dark"] .diagram-preview-canvas svg tspan.asset-focus-match,
+    :root[data-theme="dark"] .diagram-zoom-stage svg tspan.asset-focus-match {{ fill: var(--diagram-focus) !important; stroke: none !important; }}
     svg .diagram-note-panel {{ opacity: 0; pointer-events: none; transition: opacity .12s ease; }}
     svg .diagram-note-hover .diagram-note-panel, svg .diagram-note-hotspot:hover .diagram-note-panel {{ opacity: 1; pointer-events: auto; }}
-    svg .diagram-note-box {{ fill: #f8fafc; stroke: #2563eb; stroke-width: 1.8px; rx: 6px; ry: 6px; filter: drop-shadow(0 2px 4px rgba(15,23,42,.22)); }}
-    svg .diagram-note-text {{ fill: #111827; font: 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; pointer-events: none; }}
-    svg .diagram-note-link {{ fill: none; stroke: #64748b; stroke-width: 1.6px; opacity: .86; filter: drop-shadow(0 0 2px rgba(255,255,255,.95)); }}
-    svg .diagram-note-marker {{ fill: #eff6ff; stroke: #2563eb; stroke-width: 1.8px; filter: drop-shadow(0 1px 2px rgba(15,23,42,.2)); }}
-    svg .diagram-note-marker-text {{ fill: #1d4ed8; font: 700 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; text-anchor: middle; dominant-baseline: central; pointer-events: none; }}
+    svg .diagram-note-box {{ fill: var(--diagram-note-bg); stroke: var(--diagram-note-link); stroke-width: 1.8px; rx: 6px; ry: 6px; filter: drop-shadow(0 2px 4px rgba(15,23,42,.22)); }}
+    svg .diagram-note-text, svg .diagram-note-text tspan {{ fill: var(--diagram-note-text) !important; font: 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; pointer-events: none; }}
+    svg .diagram-note-link {{ fill: none; stroke: var(--diagram-note-link); stroke-width: 1.8px; opacity: .95; filter: drop-shadow(0 0 2px rgba(255,255,255,.95)); }}
+    svg .diagram-note-marker {{ fill: var(--diagram-note-marker-bg); stroke: var(--diagram-note-link); stroke-width: 1.8px; filter: drop-shadow(0 1px 2px rgba(15,23,42,.2)); }}
+    svg .diagram-note-marker-text {{ fill: var(--diagram-note-link); font: 700 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; text-anchor: middle; dominant-baseline: central; pointer-events: none; }}
     svg .diagram-note-hotspot {{ cursor: pointer; }}
-    svg .diagram-note-hover .diagram-note-box, svg .diagram-note-hotspot:hover .diagram-note-box {{ fill: #dbeafe; stroke: #1d4ed8; stroke-width: 2.4px; }}
-    svg .diagram-note-hover .diagram-note-marker, svg .diagram-note-hotspot:hover .diagram-note-marker {{ fill: #dbeafe; stroke: #1d4ed8; stroke-width: 2.4px; }}
-    svg .diagram-note-hover .diagram-note-link, svg .diagram-note-hotspot:hover .diagram-note-link {{ stroke: #1d4ed8; stroke-width: 2.1px; opacity: 1; }}
-    svg .diagram-note-hover .diagram-note-text, svg .diagram-note-hotspot:hover .diagram-note-text {{ fill: #1e3a8a; }}
+    svg .diagram-note-hover .diagram-note-box, svg .diagram-note-hotspot:hover .diagram-note-box {{ fill: var(--diagram-note-hover-bg); stroke: var(--diagram-note-link); stroke-width: 2.4px; }}
+    svg .diagram-note-hover .diagram-note-marker, svg .diagram-note-hotspot:hover .diagram-note-marker {{ fill: var(--diagram-note-hover-bg); stroke: var(--diagram-note-link); stroke-width: 2.4px; }}
+    svg .diagram-note-hover .diagram-note-link, svg .diagram-note-hotspot:hover .diagram-note-link {{ stroke: var(--diagram-note-link); stroke-width: 2.1px; opacity: 1; }}
+    svg .diagram-note-hover .diagram-note-text, svg .diagram-note-hotspot:hover .diagram-note-text,
+    svg .diagram-note-hover .diagram-note-text tspan, svg .diagram-note-hotspot:hover .diagram-note-text tspan {{ fill: var(--diagram-note-text) !important; }}
     svg .diagram-code-link-target {{ fill: var(--diagram-link) !important; text-decoration: underline; text-decoration-thickness: 1.5px; }}
     svg .diagram-code-link-connector {{ stroke: var(--diagram-link) !important; stroke-width: 2.6px !important; opacity: .96; }}
     svg polygon.diagram-code-link-connector {{ fill: var(--diagram-link) !important; }}
     svg .diagram-code-link-badge {{ cursor: pointer; }}
     svg .diagram-code-link-badge rect {{ fill: var(--diagram-link-bg); stroke: var(--diagram-link); stroke-width: 1.4px; rx: 5px; ry: 5px; filter: drop-shadow(0 1px 2px rgba(15,23,42,.18)); }}
     svg .diagram-code-link-badge text {{ fill: var(--diagram-link); font: 700 11px ui-monospace, SFMono-Regular, Consolas, monospace; text-anchor: middle; dominant-baseline: central; pointer-events: none; }}
-    svg .diagram-code-link-badge.diagram-code-link-hover rect {{ fill: var(--diagram-link-hover-bg); stroke: #1d4ed8; }}
-    svg .diagram-code-link-badge.diagram-code-link-hover text {{ fill: #1d4ed8; }}
+    svg .diagram-code-link-badge.diagram-code-link-hover rect {{ fill: var(--diagram-link-hover-bg); stroke: var(--diagram-focus); }}
+    svg .diagram-code-link-badge.diagram-code-link-hover text {{ fill: var(--diagram-focus); }}
     svg .diagram-code-link-active {{ filter: drop-shadow(0 0 3px rgba(4,120,87,.65)); }}
-    svg .asset-focus-connector.diagram-code-link-connector {{ stroke: #1d4ed8 !important; stroke-width: 3px !important; opacity: .95; }}
-    svg polygon.asset-focus-connector.diagram-code-link-connector {{ fill: #1d4ed8 !important; }}
-    svg text.asset-focus-match.diagram-code-link-target, svg tspan.asset-focus-match.diagram-code-link-target {{ fill: #1e3a8a !important; stroke: none !important; }}
-    svg .asset-focus-related-hover {{ stroke: #1d4ed8 !important; fill: #1d4ed8 !important; opacity: 1 !important; filter: drop-shadow(0 0 2px rgba(255,255,255,.95)); }}
-    svg text.asset-focus-related-hover, svg tspan.asset-focus-related-hover {{ fill: #1e3a8a !important; stroke: none !important; }}
+    svg .asset-focus-connector.diagram-code-link-connector {{ stroke: var(--diagram-focus) !important; stroke-width: 3px !important; opacity: .95; }}
+    svg polygon.asset-focus-connector.diagram-code-link-connector {{ fill: var(--diagram-focus) !important; }}
+    svg text.asset-focus-match.diagram-code-link-target, svg tspan.asset-focus-match.diagram-code-link-target {{ fill: var(--diagram-focus) !important; stroke: none !important; }}
+    svg .asset-focus-related-hover {{ stroke: var(--diagram-focus) !important; fill: var(--diagram-focus) !important; opacity: 1 !important; filter: drop-shadow(0 0 2px rgba(255,255,255,.95)); }}
+    svg text.asset-focus-related-hover, svg tspan.asset-focus-related-hover {{ fill: var(--diagram-focus) !important; stroke: none !important; }}
     svg .asset-search-match {{ fill: #cf222e; stroke: #cf222e; }}
     svg .asset-search-current {{ filter: drop-shadow(0 0 3px #fb8500); }}
     @keyframes focus-dash-flow {{ from {{ stroke-dashoffset: 0; }} to {{ stroke-dashoffset: -17; }} }}
@@ -2877,15 +3030,17 @@ def _diagram_script() -> str:
     const x = badge.x;
     const y = badge.y;
     const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+    rect.setAttribute("class", "diagram-code-link-badge-box");
     rect.setAttribute("x", String(x));
     rect.setAttribute("y", String(y));
     rect.setAttribute("width", "28");
     rect.setAttribute("height", "18");
     group.appendChild(rect);
     const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    text.setAttribute("class", "diagram-code-link-badge-text");
     text.setAttribute("x", String(x + 14));
     text.setAttribute("y", String(y + 9));
-    text.textContent = "<>";
+    text.textContent = "C";
     group.appendChild(text);
     group.addEventListener("click", function (event) {
       event.preventDefault();
@@ -2995,7 +3150,13 @@ def _diagram_script() -> str:
     header.className = "diagram-code-popover-header";
     const heading = document.createElement("span");
     heading.className = "diagram-code-popover-title";
-    heading.textContent = targetKey;
+    const headingTitle = document.createElement("span");
+    headingTitle.textContent = targetKey;
+    heading.appendChild(headingTitle);
+    const headingFile = document.createElement("span");
+    headingFile.className = "diagram-code-popover-file";
+    headingFile.textContent = codePopoverLocation(links);
+    heading.appendChild(headingFile);
     header.appendChild(heading);
     const close = document.createElement("button");
     close.type = "button";
@@ -3018,6 +3179,12 @@ def _diagram_script() -> str:
         centerCodeTarget(popover);
       });
     });
+  }
+
+  function codePopoverLocation(links) {
+    const first = links && links[0] ? links[0] : {};
+    const file = String(first.file || "unknown file");
+    return file.split("/").filter(Boolean).pop() || file;
   }
 
   function centerCodeTarget(popover) {
@@ -3195,7 +3362,7 @@ def _diagram_script() -> str:
   }
 
   function findNoteTarget(textNodes, targetText) {
-    const lowerTarget = String(targetText).toLowerCase();
+    const targets = normalizedDiagramNoteTargets(targetText);
     const seenLabels = new Set();
     for (const node of textNodes) {
       const labelNode = svgTextLabelNode(node);
@@ -3203,11 +3370,25 @@ def _diagram_script() -> str:
         continue;
       }
       seenLabels.add(labelNode);
-      if (labelNode.textContent.toLowerCase().includes(lowerTarget)) {
+      const labelText = labelNode.textContent.toLowerCase();
+      if (targets.some(function (target) { return labelText.includes(target); })) {
         return labelNode;
       }
     }
     return null;
+  }
+
+  function normalizedDiagramNoteTargets(targetText) {
+    const rawTarget = String(targetText || "").toLowerCase().trim();
+    const targets = rawTarget ? [rawTarget] : [];
+    const colonIndex = rawTarget.lastIndexOf(":");
+    if (colonIndex >= 0) {
+      const labelOnly = rawTarget.slice(colonIndex + 1).trim();
+      if (labelOnly) {
+        targets.push(labelOnly);
+      }
+    }
+    return targets;
   }
 
   function labelRightAnchor(box) {
