@@ -82,6 +82,8 @@ class ReviewComments:
     file_diagram_notes: dict[str, tuple[dict[str, Any], ...]]
     summary: str | None = None
     summary_blocks: tuple[SummaryBlock, ...] = ()
+    commit_id: str | None = None
+    commit_message: str | None = None
 
 
 @dataclass(frozen=True)
@@ -92,6 +94,16 @@ class DiffSource:
     commit: str | None = None
     subject: str | None = None
     message: str | None = None
+
+
+@dataclass(frozen=True)
+class DiffStats:
+    files_changed: int
+    files_added: int
+    files_deleted: int
+    files_renamed: int
+    lines_added: int
+    lines_deleted: int
 
 
 class DiffReportError(ValueError):
@@ -115,6 +127,7 @@ def compact_help() -> str:
             "",
             "comments.json schema:",
             "{",
+            '  "commit": {"id": "optional commit id", "message": "optional full commit message"},',
             '  "summary": "optional markdown-free text",',
             '  "files": {"path/to/file.py": "file-level comment"},',
             '  "inline": [',
@@ -167,7 +180,11 @@ def render_html_report(
     comments: ReviewComments,
 ) -> str:
     comment_count = _comment_count(comments)
-    comments_status = f'<strong id="comment-count">{comment_count}</strong> review comments loaded.'
+    commit_id = comments.commit_id or source.commit
+    commit_message = comments.commit_message or source.message
+    commit_subject = next((line for line in (commit_message or "").splitlines() if line.strip()), None)
+    subject = source.subject or commit_subject
+    stats = _diff_stats(source.diff_text)
     parts: list[str] = []
     parts.append(_html_header(title))
     parts.append(
@@ -175,28 +192,24 @@ def render_html_report(
 <main>
   <header>
     <h1>{_esc(title)}</h1>
-    <p>GitHub-style unified diff report with optional inline review comments.</p>
-    <p id="comments-status">{comments_status}</p>
-    <div class="meta">
-      <div><span class="label">Diff source</span><code>{_esc(source.label)}</code></div>
-      <div><span class="label">Subject</span>{_esc(source.subject or "n/a")}</div>
-    </div>
   </header>
 """
     )
+    if commit_id:
+        parts.append(_render_note_section("Commit ID", commit_id))
+    if subject:
+        parts.append(_render_note_section("Subject", subject))
+    if commit_message:
+        parts.append(_render_note_section("Commit Message", commit_message))
+    parts.append(_render_diff_stats_section(stats))
     if comments.summary or comments.summary_blocks:
         parts.append(_render_summary_section(comments))
-    if source.message:
-        parts.append(
-            f'  <section><h2>Commit Message</h2>'
-            f'<pre class="commit-message">{_esc(source.message)}</pre></section>\n'
-        )
-    if comments.story:
-        parts.append(_render_story_section(comments))
     if comments.diagrams:
         parts.append(_render_diagrams_section(comments))
     if comments.logs:
         parts.append(_render_logs_section(comments))
+    if comments.story:
+        parts.append(_render_story_section(comments))
     if comment_count:
         parts.append(_render_comments_index(comments, _diff_files(source.diff_text)))
     parts.append(_render_diff(source.diff_text, comments))
@@ -209,8 +222,76 @@ def render_html_report(
     return "".join(parts)
 
 
+def _render_note_section(title: str, text: str) -> str:
+    return f'  <section><h2>{_esc(title)}</h2><pre class="report-note">{_esc(text)}</pre></section>\n'
+
+
+def _render_diff_stats_section(stats: DiffStats) -> str:
+    return (
+        '  <section><h2>Diff Stats</h2><div class="diff-stats">'
+        '<div class="diff-stats-row diff-stats-lines">'
+        f'<div><span class="label">Added lines</span><strong class="diff-stat-add">+{stats.lines_added}</strong></div>'
+        f'<div><span class="label">Deleted lines</span><strong class="diff-stat-del">-{stats.lines_deleted}</strong></div>'
+        '</div>'
+        '<div class="diff-stats-row diff-stats-files">'
+        f'<div><span class="label">Files changed</span><strong>{stats.files_changed}</strong></div>'
+        f'<div><span class="label">Added files</span><strong class="diff-stat-add">{stats.files_added}</strong></div>'
+        f'<div><span class="label">Deleted files</span><strong class="diff-stat-del">{stats.files_deleted}</strong></div>'
+        f'<div><span class="label">Renamed files</span><strong>{stats.files_renamed}</strong></div>'
+        '</div>'
+        "</div></section>\n"
+    )
+
+
 def _comment_count(comments: ReviewComments) -> int:
     return len(comments.file_comments) + sum(len(items) for items in comments.inline_comments.values())
+
+
+def _diff_stats(diff_text: str) -> DiffStats:
+    lines_added = 0
+    lines_deleted = 0
+    files_changed = 0
+    files_added = 0
+    files_deleted = 0
+    files_renamed = 0
+    current_metadata: set[str] = set()
+
+    def close_file() -> None:
+        nonlocal files_added, files_deleted, files_renamed
+        if not current_metadata:
+            return
+        if "renamed" in current_metadata:
+            files_renamed += 1
+        elif "added" in current_metadata:
+            files_added += 1
+        elif "deleted" in current_metadata:
+            files_deleted += 1
+
+    for line in diff_text.splitlines():
+        if line.startswith("diff --git "):
+            close_file()
+            files_changed += 1
+            current_metadata = set()
+            continue
+        if line.startswith("new file mode "):
+            current_metadata.add("added")
+        elif line.startswith("deleted file mode "):
+            current_metadata.add("deleted")
+        elif line.startswith("rename from ") or line.startswith("rename to "):
+            current_metadata.add("renamed")
+        if line.startswith("+") and not line.startswith("+++"):
+            lines_added += 1
+        elif line.startswith("-") and not line.startswith("---"):
+            lines_deleted += 1
+    close_file()
+    return DiffStats(
+        files_changed=files_changed,
+        files_added=files_added,
+        files_deleted=files_deleted,
+        files_renamed=files_renamed,
+        lines_added=lines_added,
+        lines_deleted=lines_deleted,
+    )
 
 
 def _render_summary_section(comments: ReviewComments) -> str:
@@ -246,7 +327,6 @@ def _render_comments_index(comments: ReviewComments, diff_file_order: list[str])
     comment_file_paths = set(comments.file_comments) | {key[0] for key in comments.inline_comments}
     file_paths = [file_path for file_path in diff_file_order if file_path in comment_file_paths]
     file_paths.extend(sorted(comment_file_paths - set(file_paths)))
-    tree: dict[str, Any] = {"__items__": []}
     comments_by_file = {
         file_path: [
             comment
@@ -256,6 +336,7 @@ def _render_comments_index(comments: ReviewComments, diff_file_order: list[str])
         ]
         for file_path in file_paths
     }
+    tree: dict[str, Any] = {"__items__": []}
     for file_path in file_paths:
         node = tree
         parts_path = file_path.split("/")
@@ -388,18 +469,18 @@ def _story_anchor(step: StoryStep, index: int) -> str:
 
 
 def _render_diagrams_section(comments: ReviewComments) -> str:
-    parts = ['  <section><h2>Diagrams</h2><div class="diagram-list">\n']
+    parts = ['  <details class="asset-inventory"><summary>Diagrams</summary><div class="diagram-list">\n']
     for diagram in sorted(comments.diagrams.values(), key=lambda item: item.diagram_id):
         parts.append(_render_diagram_preview(diagram))
-    parts.append("  </div></section>\n")
+    parts.append("  </div></details>\n")
     return "".join(parts)
 
 
 def _render_logs_section(comments: ReviewComments) -> str:
-    parts = ['  <section><h2>Logs</h2><div class="diagram-list">\n']
+    parts = ['  <details class="asset-inventory"><summary>Logs</summary><div class="diagram-list">\n']
     for log in sorted(comments.logs.values(), key=lambda item: item.log_id):
         parts.append(_render_log_preview(log))
-    parts.append("  </div></section>\n")
+    parts.append("  </div></details>\n")
     return "".join(parts)
 
 
@@ -412,11 +493,12 @@ def _load_diff_source(
 ) -> DiffSource:
     if diff_file is not None:
         diff_text = diff_file.read_text(encoding="utf-8")
-        subject, message = _commit_message_from_patch(diff_text)
+        commit, subject, message = _commit_message_from_patch(diff_text)
         return DiffSource(
             diff_text=diff_text,
             stat_text="Loaded from diff file; git stat is unavailable.",
             label=display_label or str(diff_file),
+            commit=commit,
             subject=subject,
             message=message,
         )
@@ -453,6 +535,14 @@ def _comments_from_payload(
 ) -> ReviewComments:
     if not isinstance(payload, dict):
         raise DiffReportError("Comments JSON must be an object")
+
+    raw_commit = payload.get("commit", {})
+    if raw_commit is None:
+        raw_commit = {}
+    if not isinstance(raw_commit, dict):
+        raise DiffReportError("comments.commit must be an object")
+    commit_id = str(raw_commit["id"]) if "id" in raw_commit else None
+    commit_message = str(raw_commit["message"]) if "message" in raw_commit else None
 
     raw_files = payload.get("files", {})
     if not isinstance(raw_files, dict):
@@ -539,6 +629,8 @@ def _comments_from_payload(
         file_diagram_notes=file_diagram_notes,
         summary=str(payload["summary"]) if "summary" in payload else None,
         summary_blocks=summary_blocks,
+        commit_id=commit_id,
+        commit_message=commit_message,
     )
 
 
@@ -1408,6 +1500,17 @@ def _html_header(title: str) -> str:
       --bg: #f3f3f3;
       --panel: #ffffff;
       --panel-subtle: #f8f8f8;
+      --meta-panel: #ffffff;
+      --meta-border: #d0d0d0;
+      --meta-label: #57606a;
+      --meta-text: #1f1f1f;
+      --story-step-bg: #f6f8fa;
+      --story-step-border: #8c959f;
+      --story-step-hover-bg: #eef6ff;
+      --story-step-active-bg: #dbeafe;
+      --story-step-active-border: #0969da;
+      --stat-add: #1a7f37;
+      --stat-del: #cf222e;
       --border: #d0d0d0;
       --text: #1f1f1f;
       --muted: #616161;
@@ -1463,6 +1566,17 @@ def _html_header(title: str) -> str:
       --bg: #1e1e1e;
       --panel: #252526;
       --panel-subtle: #2d2d30;
+      --meta-panel: #1b1b1d;
+      --meta-border: #52525a;
+      --meta-label: #a7a7ad;
+      --meta-text: #f0f0f0;
+      --story-step-bg: #1b1b1d;
+      --story-step-border: #5f6368;
+      --story-step-hover-bg: #1f3447;
+      --story-step-active-bg: #15395b;
+      --story-step-active-border: #58a6ff;
+      --stat-add: #7ee787;
+      --stat-del: #ff7b72;
       --border: #3c3c3c;
       --text: #d4d4d4;
       --muted: #858585;
@@ -1526,15 +1640,22 @@ def _html_header(title: str) -> str:
     h2 {{ font-size: 20px; }}
     p {{ margin: 0 0 10px; }}
     .review-summary-blocks {{ display: grid; gap: 12px; }}
-    .review-summary {{ white-space: pre-line; }}
+    .review-summary {{ white-space: pre-line; overflow-wrap: anywhere; }}
     .review-summary-blocks .review-summary {{ margin: 0; }}
     .summary-artifact-preview .diagram-preview-wrap {{ margin-top: 0; }}
-    .commit-message {{ margin: 0; padding: 12px; background: var(--code-bg); border-radius: 6px; white-space: pre-wrap; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }}
+    .report-note, .review-summary {{ margin: 0; padding: 12px; border: 1px solid var(--meta-border); border-radius: 6px; background: var(--meta-panel); color: var(--meta-text); white-space: pre-wrap; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }}
+    .diff-stats {{ display: grid; gap: 10px; }}
+    .diff-stats-row {{ display: grid; gap: 10px; }}
+    .diff-stats-lines {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+    .diff-stats-files {{ grid-template-columns: repeat(4, minmax(0, 1fr)); }}
+    .diff-stats-row div {{ padding: 12px; border: 1px solid var(--meta-border); border-radius: 6px; background: var(--meta-panel); color: var(--meta-text); }}
+    .diff-stats .label {{ font-size: .86rem; }}
+    .diff-stats strong {{ display: block; margin-top: 4px; font: 800 calc(var(--screen-code-font) * 1.08)/1.2 ui-monospace, SFMono-Regular, Consolas, monospace; }}
+    .diff-stat-add {{ color: var(--stat-add); }}
+    .diff-stat-del {{ color: var(--stat-del); }}
     code {{ background: rgba(175,184,193,.2); border-radius: 4px; padding: 1px 5px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }}
     pre.stat {{ margin: 10px 0 0; padding: 12px; background: var(--code-bg); border-radius: 6px; overflow-x: auto; }}
-    .meta {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; margin-top: 14px; }}
-    .meta div {{ border: 1px solid var(--border); border-radius: 6px; padding: 10px; background: var(--panel-subtle); }}
-    .label {{ display: block; color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 3px; }}
+    .label {{ display: block; color: var(--meta-label); font-size: .72rem; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 3px; }}
     .toc a {{ display: inline-block; margin: 0 8px 8px 0; color: var(--link); text-decoration: none; }}
     .toc a:hover {{ text-decoration: underline; }}
     .review-nav {{ position: fixed; left: 8px; top: max(270px, var(--story-offset)); bottom: 8px; z-index: 8; width: var(--nav-width); margin: 0; padding: 10px 14px 10px 10px; overflow: auto; box-shadow: 0 8px 22px rgba(31,35,40,.10); }}
@@ -1579,15 +1700,24 @@ def _html_header(title: str) -> str:
     #story-counter {{ color: var(--muted); min-width: 44px; text-align: center; font-size: var(--screen-code-font); }}
     .story-steps {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); align-items: stretch; gap: 6px; margin: 0; padding: 0; list-style: none; }}
     .story-steps li {{ min-width: 0; }}
-    .story-step {{ display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 7px; align-items: center; width: 100%; height: 100%; min-height: 42px; padding: 7px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--button-bg); color: inherit; text-align: left; cursor: pointer; font: inherit; }}
-    .story-step:hover {{ border-color: var(--link); box-shadow: 0 0 0 2px rgba(9,105,218,.12); }}
-    .story-step.is-active {{ border-color: var(--link); background: var(--button-hover-bg); box-shadow: inset 4px 0 0 var(--link); }}
-    .story-step-index {{ color: var(--muted); font: 700 var(--screen-code-font)/1.35 ui-monospace, SFMono-Regular, Consolas, monospace; }}
+    .story-step {{ display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 7px; align-items: center; width: 100%; height: 100%; min-height: 44px; padding: 8px 10px; border: 1px solid var(--story-step-border); border-radius: 6px; background: var(--story-step-bg); color: var(--text); text-align: left; cursor: pointer; font: inherit; box-shadow: 0 1px 0 rgba(31,35,40,.08); transition: background .12s ease, border-color .12s ease, box-shadow .12s ease, transform .12s ease; }}
+    .story-step:hover {{ border-color: var(--story-step-active-border); background: var(--story-step-hover-bg); box-shadow: 0 0 0 2px rgba(9,105,218,.18); transform: translateY(-1px); }}
+    .story-step:focus-visible {{ outline: 2px solid var(--story-step-active-border); outline-offset: 2px; }}
+    .story-step.is-active {{ border-color: var(--story-step-active-border); background: var(--story-step-active-bg); box-shadow: inset 4px 0 0 var(--story-step-active-border), 0 0 0 1px color-mix(in srgb, var(--story-step-active-border) 34%, transparent); }}
+    .story-step-index {{ color: var(--story-step-active-border); font: 800 var(--screen-code-font)/1.35 ui-monospace, SFMono-Regular, Consolas, monospace; }}
     .story-step-text {{ display: grid; gap: 3px; min-width: 0; }}
     .story-step-text strong {{ display: -webkit-box; overflow: hidden; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; font-size: var(--screen-code-font); line-height: 1.25; }}
     .story-details {{ margin-top: 7px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel-subtle); }}
     .story-details-title {{ padding: 7px 8px; font-size: var(--screen-code-font); font-weight: 700; }}
     .story-details div:not(.story-details-title) {{ padding: 0 8px 8px; color: var(--muted); font-size: var(--screen-code-font); line-height: 1.35; white-space: pre-line; overflow-wrap: anywhere; }}
+    .asset-inventory {{ background: var(--panel); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 16px; }}
+    .asset-inventory summary {{ display: flex; align-items: center; gap: 10px; padding: 14px 20px; font-size: 20px; font-weight: 700; line-height: 1.2; cursor: pointer; user-select: none; }}
+    .asset-inventory summary:hover {{ color: var(--link); background: var(--button-hover-bg); }}
+    .asset-inventory summary:focus-visible {{ outline: 2px solid var(--link); outline-offset: 2px; }}
+    .asset-inventory summary::before {{ content: ">"; color: var(--link); font: 800 var(--screen-code-font)/1 ui-monospace, SFMono-Regular, Consolas, monospace; }}
+    .asset-inventory[open] summary {{ border-bottom: 1px solid var(--border); }}
+    .asset-inventory[open] summary::before {{ content: "v"; }}
+    .asset-inventory .diagram-list {{ padding: 14px 20px 20px; }}
     .story-target-active {{ outline: 3px solid rgba(9,105,218,.35); outline-offset: 2px; scroll-margin-top: calc(var(--story-offset) + 72px); }}
     .story-target-flash {{ animation: story-target-flash .4s ease-out; }}
     tr.code-target-flash .code {{ animation: code-target-flash .4s ease-out; }}
@@ -2787,24 +2917,27 @@ def _diagram_script() -> str:
       const firstLine = content.querySelector(".asset-focus-line");
       if (firstLine) {
         window.setTimeout(function () {
-          animateScrollContainerToElement(content, firstLine, 1000);
+          animateScrollContainerToElement(content, firstLine, 1000, { horizontal: false });
         }, 40);
       }
     }
   }
 
-  function animateScrollContainerToElement(container, element, durationMs) {
+  function animateScrollContainerToElement(container, element, durationMs, options) {
+    const scrollHorizontal = !options || options.horizontal !== false;
     const startLeft = container.scrollLeft;
     const startTop = container.scrollTop;
     const containerRect = container.getBoundingClientRect();
     const targetRect = elementViewportRect(element);
     const maxLeft = Math.max(0, container.scrollWidth - container.clientWidth);
     const maxTop = Math.max(0, container.scrollHeight - container.clientHeight);
-    const targetLeft = clamp(
-      startLeft + targetRect.left - containerRect.left - container.clientWidth / 2 + targetRect.width / 2,
-      0,
-      maxLeft
-    );
+    const targetLeft = scrollHorizontal
+      ? clamp(
+          startLeft + targetRect.left - containerRect.left - container.clientWidth / 2 + targetRect.width / 2,
+          0,
+          maxLeft
+        )
+      : startLeft;
     const targetTop = clamp(
       startTop + targetRect.top - containerRect.top - container.clientHeight / 2 + targetRect.height / 2,
       0,
@@ -3562,7 +3695,11 @@ def _diagram_script() -> str:
       return;
     }
     current.classList.add("asset-search-current");
-    current.scrollIntoView({ block: "center", inline: "center" });
+    if (mode === "log") {
+      animateScrollContainerToElement(content, current, 180, { horizontal: false });
+    } else {
+      current.scrollIntoView({ block: "center", inline: "center" });
+    }
     if (searchCount) {
       searchCount.textContent = (searchIndex + 1) + "/" + searchMatches.length;
     }
@@ -3821,11 +3958,16 @@ def _git(repo_path: Path, args: list[str]) -> str:
         raise DiffReportError(message) from error
 
 
-def _commit_message_from_patch(diff_text: str) -> tuple[str | None, str | None]:
+def _commit_message_from_patch(diff_text: str) -> tuple[str | None, str | None, str | None]:
+    commit_id = None
     message_lines: list[str] = []
     in_message = False
 
     for line in diff_text.splitlines():
+        if commit_id is None and line.startswith("From "):
+            parts = line.split()
+            if len(parts) >= 2:
+                commit_id = parts[1]
         if line.startswith("diff --git "):
             break
         if line.startswith("    "):
@@ -3842,11 +3984,11 @@ def _commit_message_from_patch(diff_text: str) -> tuple[str | None, str | None]:
         message_lines.pop()
 
     if not message_lines:
-        return None, None
+        return commit_id, None, None
 
     message = "\n".join(message_lines)
     subject = next((line for line in message_lines if line), None)
-    return subject, message
+    return commit_id, subject, message
 
 
 def _diff_files(diff_text: str) -> list[str]:
