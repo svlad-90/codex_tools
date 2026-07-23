@@ -7,8 +7,30 @@
     {
       "file": "path/to/file.py",
       "line": 42,
+      "range": {
+        "start": 42,
+        "end": 45
+      },
       "title": "Review comment",
-      "body": "Inline review note shown under the target new-file line."
+      "body": "Inline review note shown under the target new-file line range."
     }
-  ]
+  ],
+  "diagrams": {
+    "optional-diagram-id": {
+      "title": "Diagram title",
+      "svg": "../puml/diagram.svg",
+      "code_links": [
+        {
+          "target": "SVG arrow label text",
+          "file": "path/to/file.py",
+          "line": 42,
+          "title": "Open implementation",
+          "range": {
+            "start": 36,
+            "end": 58
+          }
+        }
+      ]
+    }
+  }
 }
