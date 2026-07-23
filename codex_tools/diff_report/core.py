@@ -200,7 +200,7 @@ def render_html_report(
     if subject:
         parts.append(_render_note_section("Subject", subject))
     if commit_message:
-        parts.append(_render_note_section("Commit Message", commit_message))
+        parts.append(_render_note_section("Commit Message", _commit_body_without_subject(commit_message)))
     parts.append(_render_diff_stats_section(stats))
     if comments.summary or comments.summary_blocks:
         parts.append(_render_summary_section(comments))
@@ -223,7 +223,17 @@ def render_html_report(
 
 
 def _render_note_section(title: str, text: str) -> str:
-    return f'  <section><h2>{_esc(title)}</h2><pre class="report-note">{_esc(text)}</pre></section>\n'
+    return f'  <section class="note-section"><h2>{_esc(title)}</h2><pre class="report-note">{_esc(text)}</pre></section>\n'
+
+
+def _commit_body_without_subject(message: str) -> str:
+    lines = message.splitlines()
+    if not lines:
+        return message
+    body_lines = lines[1:]
+    while body_lines and body_lines[0] == "":
+        body_lines.pop(0)
+    return "\n".join(body_lines)
 
 
 def _render_diff_stats_section(stats: DiffStats) -> str:
@@ -295,7 +305,7 @@ def _diff_stats(diff_text: str) -> DiffStats:
 
 
 def _render_summary_section(comments: ReviewComments) -> str:
-    parts = ['  <section><h2>Reviewer Summary</h2><div class="review-summary-blocks">\n']
+    parts = ['  <section class="summary-section"><h2>Reviewer Summary</h2><div class="review-summary-blocks">\n']
     if comments.summary_blocks:
         for block in comments.summary_blocks:
             if block.kind == "text":
@@ -1643,7 +1653,8 @@ def _html_header(title: str) -> str:
     .review-summary {{ white-space: pre-line; overflow-wrap: anywhere; }}
     .review-summary-blocks .review-summary {{ margin: 0; }}
     .summary-artifact-preview .diagram-preview-wrap {{ margin-top: 0; }}
-    .report-note, .review-summary {{ margin: 0; padding: 12px; border: 1px solid var(--meta-border); border-radius: 6px; background: var(--meta-panel); color: var(--meta-text); white-space: pre-wrap; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }}
+    .report-note, .review-summary {{ width: 100%; margin: 0; padding: 12px; border: 1px solid var(--meta-border); border-radius: 6px; background: var(--meta-panel); color: var(--meta-text); white-space: pre-wrap; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }}
+    .report-note {{ max-width: none; }}
     .diff-stats {{ display: grid; gap: 10px; }}
     .diff-stats-row {{ display: grid; gap: 10px; }}
     .diff-stats-lines {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
