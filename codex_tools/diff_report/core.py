@@ -1570,6 +1570,8 @@ def _html_header(title: str) -> str:
       --story-offset: 0px;
       --screen-body-font: clamp(22px, 0.65cm, 30px);
       --screen-code-font: clamp(18px, 0.52cm, 24px);
+      --content-offset-width: 1360px;
+      --content-width: 1260px;
     }}
     :root[data-theme="dark"] {{
       color-scheme: dark;
@@ -1633,16 +1635,17 @@ def _html_header(title: str) -> str:
     }}
     * {{ box-sizing: border-box; }}
     body {{ margin: 0; background: var(--bg); color: var(--text); font: var(--screen-body-font)/1.52 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
-    main {{ width: calc(100% - var(--nav-width) - 24px); margin: 8px 8px 16px calc(var(--nav-width) + 16px); }}
-    .report-brand {{ position: fixed; left: 8px; top: 8px; z-index: 4; display: flex; align-items: center; justify-content: center; width: var(--nav-width); height: max(200px, calc(var(--story-offset) - 16px)); pointer-events: none; color: var(--brand-text); }}
-    .report-brand-inner {{ display: grid; grid-template-columns: 144px minmax(0, 1fr); align-items: center; gap: 28px; width: var(--left-chrome-width); height: 176px; padding: 16px 28px; border: 1px solid rgba(208,215,222,.85); border-radius: 10px; background: var(--brand-panel); box-shadow: 0 10px 24px var(--shadow); font-weight: 800; letter-spacing: 0; }}
+    main {{ width: calc(100% - var(--nav-width) - 24px); max-width: calc(100vw - var(--nav-width) - 24px); min-width: 0; margin: 8px 8px 16px calc(var(--nav-width) + 16px); }}
+    .report-brand {{ position: fixed; left: 8px; top: 8px; z-index: 4; display: flex; align-items: flex-start; justify-content: center; width: var(--nav-width); height: max(250px, calc(var(--story-offset) - 16px)); padding-top: 16px; pointer-events: none; color: var(--brand-text); }}
+    .report-brand::before {{ content: ""; position: absolute; inset: 0; height: 250px; border-radius: 10px; background: var(--brand-panel); box-shadow: 0 10px 24px var(--shadow); }}
+    .report-brand-inner {{ position: relative; display: grid; grid-template-columns: 144px minmax(0, 1fr); align-items: center; gap: 24px; width: 100%; height: 176px; padding: 16px 28px; font-weight: 800; letter-spacing: 0; }}
     .report-brand-mark {{ display: flex; align-items: center; justify-content: center; width: 144px; height: 144px; border-radius: 10px; background: #0969da; color: #fff; font: 800 92px/1 ui-monospace, SFMono-Regular, Consolas, monospace; }}
     .report-brand-text {{ display: grid; gap: 2px; min-width: 0; line-height: 1.05; }}
     .report-brand-title {{ font-size: 80px; white-space: nowrap; }}
     .report-brand-subtitle {{ color: var(--muted); font-size: 40px; white-space: nowrap; }}
-    .theme-toggle {{ position: fixed; left: var(--left-chrome-x); top: max(214px, calc(var(--story-offset) - 56px)); z-index: 9; display: inline-flex; align-items: center; justify-content: center; width: var(--left-chrome-width); height: 44px; padding: 0 18px; border: 1px solid var(--border); border-radius: 999px; background: var(--button-bg); color: var(--link); box-shadow: 0 10px 28px var(--shadow); cursor: pointer; font: 800 18px/1 ui-monospace, SFMono-Regular, Consolas, monospace; }}
+    .theme-toggle {{ position: fixed; left: 24px; top: 206px; z-index: 9; display: inline-flex; align-items: center; justify-content: center; width: calc(var(--nav-width) - 32px); height: 34px; padding: 0 18px; border: 1px solid var(--border); border-radius: 999px; background: var(--button-bg); color: var(--link); box-shadow: none; cursor: pointer; font: 800 18px/1 ui-monospace, SFMono-Regular, Consolas, monospace; }}
     .theme-toggle:hover {{ border-color: var(--link); box-shadow: 0 12px 32px rgba(9,105,218,.22); }}
-    header, section, .file {{ background: var(--panel); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 16px; }}
+    header, section, .file {{ width: min(100%, var(--content-width)); max-width: 100%; min-width: 0; margin-right: auto; margin-left: max(0px, calc((100% - var(--content-offset-width)) / 4)); background: var(--panel); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 16px; }}
     .file {{ border-top: 0; }}
     header, section {{ padding: 20px; }}
     h1, h2 {{ margin: 0 0 12px; line-height: 1.2; }}
@@ -1653,19 +1656,19 @@ def _html_header(title: str) -> str:
     .review-summary {{ white-space: pre-line; overflow-wrap: anywhere; }}
     .review-summary-blocks .review-summary {{ margin: 0; }}
     .summary-artifact-preview .diagram-preview-wrap {{ margin-top: 0; }}
-    .report-note, .review-summary {{ width: 100%; margin: 0; padding: 12px; border: 1px solid var(--meta-border); border-radius: 6px; background: var(--meta-panel); color: var(--meta-text); white-space: pre-wrap; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }}
-    .report-note {{ max-width: none; }}
+    .report-note, .review-summary {{ display: block; width: 100%; max-width: 100%; min-width: 0; margin: 0; padding: 12px; border: 1px solid var(--meta-border); border-radius: 6px; background: var(--meta-panel); color: var(--meta-text); white-space: pre-wrap; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }}
+    .report-note {{ max-width: 100%; }}
     .diff-stats {{ display: grid; gap: 10px; }}
     .diff-stats-row {{ display: grid; gap: 10px; }}
     .diff-stats-lines {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
     .diff-stats-files {{ grid-template-columns: repeat(4, minmax(0, 1fr)); }}
-    .diff-stats-row div {{ padding: 12px; border: 1px solid var(--meta-border); border-radius: 6px; background: var(--meta-panel); color: var(--meta-text); }}
+    .diff-stats-row div {{ min-width: 0; max-width: 100%; padding: 12px; border: 1px solid var(--meta-border); border-radius: 6px; background: var(--meta-panel); color: var(--meta-text); overflow-wrap: anywhere; }}
     .diff-stats .label {{ font-size: .86rem; }}
     .diff-stats strong {{ display: block; margin-top: 4px; font: 800 calc(var(--screen-code-font) * 1.08)/1.2 ui-monospace, SFMono-Regular, Consolas, monospace; }}
     .diff-stat-add {{ color: var(--stat-add); }}
     .diff-stat-del {{ color: var(--stat-del); }}
     code {{ background: rgba(175,184,193,.2); border-radius: 4px; padding: 1px 5px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }}
-    pre.stat {{ margin: 10px 0 0; padding: 12px; background: var(--code-bg); border-radius: 6px; overflow-x: auto; }}
+    pre.stat {{ max-width: 100%; margin: 10px 0 0; padding: 12px; background: var(--code-bg); border-radius: 6px; overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; }}
     .label {{ display: block; color: var(--meta-label); font-size: .72rem; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 3px; }}
     .toc a {{ display: inline-block; margin: 0 8px 8px 0; color: var(--link); text-decoration: none; }}
     .toc a:hover {{ text-decoration: underline; }}
@@ -1718,10 +1721,10 @@ def _html_header(title: str) -> str:
     .story-step-index {{ color: var(--story-step-active-border); font: 800 var(--screen-code-font)/1.35 ui-monospace, SFMono-Regular, Consolas, monospace; }}
     .story-step-text {{ display: grid; gap: 3px; min-width: 0; }}
     .story-step-text strong {{ display: -webkit-box; overflow: hidden; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; font-size: var(--screen-code-font); line-height: 1.25; }}
-    .story-details {{ margin-top: 7px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel-subtle); }}
+    .story-details {{ min-width: 0; max-width: 100%; margin-top: 7px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel-subtle); }}
     .story-details-title {{ padding: 7px 8px; font-size: var(--screen-code-font); font-weight: 700; }}
     .story-details div:not(.story-details-title) {{ padding: 0 8px 8px; color: var(--muted); font-size: var(--screen-code-font); line-height: 1.35; white-space: pre-line; overflow-wrap: anywhere; }}
-    .asset-inventory {{ background: var(--panel); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 16px; }}
+    .asset-inventory {{ width: min(100%, var(--content-width)); max-width: 100%; min-width: 0; margin-right: auto; margin-left: max(0px, calc((100% - var(--content-offset-width)) / 4)); background: var(--panel); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 16px; }}
     .asset-inventory summary {{ display: flex; align-items: center; gap: 10px; padding: 14px 20px; font-size: 20px; font-weight: 700; line-height: 1.2; cursor: pointer; user-select: none; }}
     .asset-inventory summary:hover {{ color: var(--link); background: var(--button-hover-bg); }}
     .asset-inventory summary:focus-visible {{ outline: 2px solid var(--link); outline-offset: 2px; }}
@@ -1738,7 +1741,7 @@ def _html_header(title: str) -> str:
     tr.code-target-flash-start.code-target-flash-end .code {{ box-shadow: inset 4px 0 0 rgba(9,105,218,.85), inset -3px 0 0 rgba(9,105,218,.55), inset 0 3px 0 rgba(9,105,218,.75), inset 0 -3px 0 rgba(9,105,218,.45); }}
     .file, .file-comment, .review-comment, tr[id] {{ scroll-margin-top: calc(var(--story-offset) + 72px); }}
     .file-header {{ margin: -1px -1px 0; padding: 10px 13px; border-bottom: 1px solid var(--border); background: var(--header-bg); font-weight: 700; position: sticky; top: calc(var(--story-offset) - 2px); z-index: 6; box-shadow: 0 1px 0 var(--border); }}
-    .file-comment {{ margin: 6px 12px 6px; padding: 8px 12px; border-left: 4px solid var(--comment-border); background: var(--comment-bg); border-radius: 6px; }}
+    .file-comment {{ min-width: 0; max-width: calc(100% - 24px); margin: 6px 12px 6px; padding: 8px 12px; border-left: 4px solid var(--comment-border); background: var(--comment-bg); border-radius: 6px; overflow-wrap: anywhere; }}
     table.diff {{ width: 100%; border-collapse: collapse; table-layout: fixed; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: var(--screen-code-font); line-height: 1.5; }}
     .diff td {{ vertical-align: top; border: 0; padding: 0; }}
     .num {{ width: 64px; padding: 0 10px !important; color: var(--muted); text-align: right; user-select: none; border-right: 1px solid var(--border) !important; }}
@@ -1760,7 +1763,7 @@ def _html_header(title: str) -> str:
     .review-comment {{ position: relative; margin: 6px 18px 14px 112px; border: 1px solid var(--comment-panel-border); border-left-width: 4px; background: var(--comment-bg); border-radius: 6px; box-shadow: 0 1px 2px rgba(31,35,40,.08); overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
     .review-comment::before {{ content: ""; position: absolute; top: -7px; left: -4px; width: 4px; height: 7px; background: var(--comment-border); }}
     .review-comment .title {{ padding: 8px 10px; font-weight: 700; border-bottom: 1px solid var(--comment-title-border); background: var(--comment-title-bg); }}
-    .review-comment .body {{ padding: 9px 10px; }}
+    .review-comment .body {{ min-width: 0; max-width: 100%; padding: 9px 10px; overflow-wrap: anywhere; }}
     .diagram-list {{ display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: flex-start; gap: 12px; }}
     .diagram-preview-wrap {{ margin-top: 10px; }}
     .diagram-preview {{ display: block; width: min(420px, 100%); border: 1px solid var(--border); border-radius: 6px; background: var(--button-bg); padding: 0; text-align: left; cursor: zoom-in; overflow: hidden; color: inherit; }}
@@ -1769,7 +1772,7 @@ def _html_header(title: str) -> str:
     .diagram-preview-canvas {{ display: flex; align-items: center; justify-content: center; height: 180px; padding: 10px; overflow: hidden; background: var(--diagram-bg); }}
     .diagram-preview-canvas svg {{ max-width: 100%; max-height: 100%; width: auto; height: auto; filter: var(--diagram-svg-filter); }}
     .log-preview {{ cursor: pointer; }}
-    .log-preview-text {{ height: 180px; margin: 0; padding: 10px; overflow: hidden; background: #0d1117; color: #e6edf3; font: 12px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; text-align: left; }}
+    .log-preview-text {{ max-width: 100%; height: 180px; margin: 0; padding: 10px; overflow: hidden; background: #0d1117; color: #e6edf3; font: 18px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; text-align: left; }}
     .diagram-modal[hidden] {{ display: none; }}
     .diagram-modal {{ position: fixed; inset: 0; z-index: 1000; }}
     .diagram-backdrop {{ position: absolute; inset: 0; background: rgba(31,35,40,.55); }}
@@ -1805,6 +1808,7 @@ def _html_header(title: str) -> str:
     .diagram-scroll[data-mode="diagram"] .diagram-zoom-stage {{ cursor: grab; }}
     .diagram-scroll.is-panning, .diagram-scroll.is-panning .diagram-zoom-stage {{ cursor: grabbing; user-select: none; }}
     .diagram-zoom-stage {{ transform-origin: 0 0; width: max-content; min-width: 100%; }}
+    .diagram-scroll[data-mode="log"] .diagram-zoom-stage {{ width: 100%; max-width: 100%; min-width: 0; }}
     .diagram-zoom-stage svg {{ display: block; max-width: none; height: auto; filter: var(--diagram-svg-filter); }}
     :root[data-theme="dark"] .diagram-preview-canvas svg text:not(.diagram-note-text):not(.diagram-note-marker-text):not(.diagram-code-link-badge-text):not(.asset-focus-match):not(.asset-focus-related-hover),
     :root[data-theme="dark"] .diagram-zoom-stage svg text:not(.diagram-note-text):not(.diagram-note-marker-text):not(.diagram-code-link-badge-text):not(.asset-focus-match):not(.asset-focus-related-hover),
@@ -1822,8 +1826,9 @@ def _html_header(title: str) -> str:
     :root[data-theme="dark"] .diagram-zoom-stage svg rect:not(.diagram-note-box):not(.diagram-code-link-badge-box) {{ fill: var(--diagram-svg-box-bg) !important; stroke: var(--diagram-svg-line) !important; }}
     :root[data-theme="dark"] .diagram-preview-canvas svg path[fill="#FBFB77"],
     :root[data-theme="dark"] .diagram-zoom-stage svg path[fill="#FBFB77"] {{ fill: var(--diagram-svg-note-bg) !important; stroke: var(--comment-border) !important; }}
-    .log-view-text {{ margin: 0; min-width: 100%; color: #e6edf3; background: #0d1117; padding: 14px; border-radius: 6px; font: 13.5px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }}
-    .asset-focus-line {{ display: block; margin: 0 -4px; padding: 0 4px; background: rgba(255, 171, 112, .32); border-left: 3px solid #fb8500; }}
+    .log-view-text {{ width: 100%; max-width: 100%; min-width: 0; margin: 0; color: #e6edf3; background: #0d1117; padding: 14px; border-radius: 6px; font: 20px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }}
+    .log-view-text * {{ max-width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }}
+    .asset-focus-line {{ display: block; min-width: 0; margin: 0 -4px; padding: 0 4px; background: rgba(255, 171, 112, .32); border-left: 3px solid #fb8500; }}
     mark.asset-search-match {{ background: #fff8c5; color: inherit; padding: 0 1px; border-radius: 2px; }}
     mark.asset-search-current {{ background: #ffab70; outline: 1px solid #fb8500; }}
     svg .asset-focus-connector {{ stroke: var(--diagram-focus) !important; stroke-width: 3px !important; opacity: .95; filter: drop-shadow(0 0 2px rgba(255,255,255,.95)); }}
