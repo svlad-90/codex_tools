@@ -32,5 +32,23 @@
         }
       ]
     }
-  }
+  },
+  "story": [
+    {
+      "title": "Start at the review comment",
+      "body": "This anchors the reader at the code range that motivated the review.",
+      "comment": {
+        "file": "path/to/file.py",
+        "line": 42
+      }
+    },
+    {
+      "title": "Then continue at the next review comment",
+      "body": "This keeps the story focused on the reading order while the comment carries its own diagram link.",
+      "comment": {
+        "file": "path/to/file.py",
+        "line": 42
+      }
+    }
+  ]
 }
