@@ -42,11 +42,28 @@ class LogAttachment:
 
 
 @dataclass(frozen=True)
+class StoryStep:
+    step_id: str
+    title: str
+    body: str
+    file_path: str | None = None
+    line: int | None = None
+    comment_file_path: str | None = None
+    comment_line: int | None = None
+    diagram: str | None = None
+    log: str | None = None
+    diagram_focus: tuple[str, ...] = ()
+    log_focus: tuple[str, ...] = ()
+    diagram_notes: tuple[dict[str, Any], ...] = ()
+
+
+@dataclass(frozen=True)
 class ReviewComments:
     file_comments: dict[str, str]
     inline_comments: dict[tuple[str, int], tuple[InlineComment, ...]]
     diagrams: dict[str, Diagram]
     logs: dict[str, LogAttachment]
+    story: tuple[StoryStep, ...]
     file_diagrams: dict[str, str]
     file_logs: dict[str, str]
     file_diagram_focus: dict[str, tuple[str, ...]]
@@ -92,7 +109,8 @@ def compact_help() -> str:
             '    {"file": "path/to/file.py", "line": 42, "range": {"start": 42, "end": 45}, "body": "comment", "title": "optional", "diagram": "optional-id", "diagram_focus": ["important SVG text"], "diagram_notes": [{"text": "note", "target": "SVG text"}], "log": "optional-log-id", "log_focus": ["important log line text"]}',
             "  ],",
             '  "diagrams": {"optional-id": {"title": "Diagram title", "svg": "report/puml/diagram.svg", "code_links": [{"target": "SVG arrow label", "file": "path/to/file.py", "line": 42, "title": "Code target"}]}},',
-            '  "logs": {"optional-log-id": {"title": "Runtime log", "path": "report/runtime/test.log"}}',
+            '  "logs": {"optional-log-id": {"title": "Runtime log", "path": "report/runtime/test.log"}},',
+            '  "story": [{"title": "Narrative step", "body": "why this matters", "comment": {"file": "path/to/file.py", "line": 42}}]',
             "}",
         ]
     )
@@ -136,7 +154,6 @@ def render_html_report(
     source: DiffSource,
     comments: ReviewComments,
 ) -> str:
-    files = _diff_files(source.diff_text)
     comment_count = _comment_count(comments)
     comments_status = f'<strong id="comment-count">{comment_count}</strong> review comments loaded.'
     parts: list[str] = []
@@ -165,20 +182,21 @@ def render_html_report(
             f'  <section><h2>Commit Message</h2>'
             f'<pre class="commit-message">{_esc(source.message)}</pre></section>\n'
         )
+    if comments.story:
+        parts.append(_render_story_section(comments))
     if comments.diagrams:
         parts.append(_render_diagrams_section(comments))
     if comments.logs:
         parts.append(_render_logs_section(comments))
     if comment_count:
-        parts.append(_render_comments_index(comments))
-    parts.append('  <section><h2>Changed Files</h2><div class="toc">\n')
-    for file_path in files:
-        parts.append(f'    <a href="#{_anchor(file_path)}">{_esc(file_path)}</a>\n')
-    parts.append(f'  </div><pre class="stat">{_esc(source.stat_text)}</pre></section>\n')
+        parts.append(_render_comments_index(comments, _diff_files(source.diff_text)))
     parts.append(_render_diff(source.diff_text, comments))
     if comments.diagrams or comments.logs:
         parts.append(_render_diagram_modal(comments))
-    parts.append("</main>\n</body>\n</html>\n")
+    if comments.story:
+        parts.append(_story_script())
+    parts.append(_theme_script())
+    parts.append('</main>\n<div class="scroll-spacer" aria-hidden="true"></div>\n</body>\n</html>\n')
     return "".join(parts)
 
 
@@ -186,34 +204,154 @@ def _comment_count(comments: ReviewComments) -> int:
     return len(comments.file_comments) + sum(len(items) for items in comments.inline_comments.values())
 
 
-def _render_comments_index(comments: ReviewComments) -> str:
-    parts = ['  <section><h2>Review Comments</h2>\n']
-    if comments.file_comments:
-        parts.append("    <h3>File-level comments</h3>\n    <ul class=\"comment-index\">\n")
-        for file_path, body in sorted(comments.file_comments.items()):
-            parts.append(
-                f'      <li><a href="#{_anchor(file_path)}">{_esc(file_path)}</a>: '
-                f'{_esc(body)}</li>\n'
-            )
-        parts.append("    </ul>\n")
-
-    inline_items = [
-        comment
-        for key in sorted(comments.inline_comments)
-        for comment in comments.inline_comments[key]
+def _render_comments_index(comments: ReviewComments, diff_file_order: list[str]) -> str:
+    parts = [
+        '  <section class="review-nav" id="review-comments">'
+        '<div class="review-nav-head"><h2>Review Comments</h2>'
+        '<button type="button" data-review-nav-reset>Reset tree</button></div>\n'
     ]
-    if inline_items:
-        parts.append("    <h3>Inline comments</h3>\n    <ol class=\"comment-index\">\n")
-        for comment in inline_items:
-            location = _comment_location(comment)
-            parts.append(
-                f'      <li><a href="#{_comment_anchor(comment.file_path, comment.line)}">'
-                f'{_esc(location)}</a> '
-                f'<strong>{_esc(comment.title)}</strong>: {_esc(comment.body)}</li>\n'
-            )
-        parts.append("    </ol>\n")
+    comment_file_paths = set(comments.file_comments) | {key[0] for key in comments.inline_comments}
+    file_paths = [file_path for file_path in diff_file_order if file_path in comment_file_paths]
+    file_paths.extend(sorted(comment_file_paths - set(file_paths)))
+    tree: dict[str, Any] = {"__items__": []}
+    comments_by_file = {
+        file_path: [
+            comment
+            for key in sorted(comments.inline_comments)
+            if key[0] == file_path
+            for comment in comments.inline_comments[key]
+        ]
+        for file_path in file_paths
+    }
+    for file_path in file_paths:
+        node = tree
+        parts_path = file_path.split("/")
+        for path_part in parts_path[:-1]:
+            if path_part not in node:
+                node[path_part] = {"__items__": []}
+                node["__items__"].append(("dir", path_part))
+            node = node[path_part]
+        node["__items__"].append(("file", file_path))
+
+    def render_tree(node: dict[str, Any], depth: int) -> None:
+        items = list(node.get("__items__", ()))
+        if not items:
+            return
+        parts.append(f'{" " * (6 + depth * 2)}<ul class="review-nav-children">\n')
+        for item_kind, item_value in items:
+            if item_kind == "dir":
+                dirname = item_value
+                child = node[dirname]
+                child_items = list(child.get("__items__", ()))
+                child_dirs = [kind for kind, _value in child_items if kind == "dir"]
+                child_files = [kind for kind, _value in child_items if kind == "file"]
+                is_passthrough = not child_files and len(child_dirs) == 1
+                parts.append(
+                    f'{" " * (8 + depth * 2)}<li class="review-nav-node review-nav-dir '
+                    f'{"review-nav-passthrough " if is_passthrough else ""}is-open">\n'
+                )
+                if is_passthrough:
+                    toggle = '<span class="review-nav-toggle-spacer" aria-hidden="true"></span>'
+                else:
+                    toggle = (
+                        '<button type="button" class="review-nav-toggle" aria-expanded="true">'
+                        '<span class="review-nav-twist" aria-hidden="true"></span></button>'
+                    )
+                parts.append(
+                    f'{" " * (10 + depth * 2)}<div class="review-nav-row">{toggle}'
+                    f'<span class="review-nav-label">{_esc(dirname)}</span></div>\n'
+                )
+                render_tree(child, depth + 1)
+                parts.append(f'{" " * (8 + depth * 2)}</li>\n')
+                continue
+            if item_kind == "file":
+                file_path = item_value
+                filename = file_path.rsplit("/", 1)[-1]
+                file_comments = comments_by_file[file_path]
+                parts.append(f'{" " * (8 + depth * 2)}<li class="review-nav-node review-nav-file">\n')
+                if file_comments:
+                    toggle = (
+                        '<button type="button" class="review-nav-toggle" aria-expanded="false">'
+                        '<span class="review-nav-twist" aria-hidden="true"></span></button>'
+                    )
+                else:
+                    toggle = '<span class="review-nav-toggle-spacer" aria-hidden="true"></span>'
+                parts.append(
+                    f'{" " * (10 + depth * 2)}<div class="review-nav-row">{toggle}'
+                    f'<a class="review-nav-label" href="#{_anchor(file_path)}">{_esc(filename)}</a></div>\n'
+                )
+                if file_comments:
+                    parts.append(
+                        f'{" " * (12 + depth * 2)}<ol class="review-nav-comments">\n'
+                    )
+                    for comment in file_comments:
+                        parts.append(
+                            f'{" " * (14 + depth * 2)}<li>'
+                            f'<a href="#{_comment_anchor(comment.file_path, comment.line)}">'
+                            f'<span class="review-nav-line">{comment.line}</span>'
+                            f'<span>{_esc(comment.title)}</span></a></li>\n'
+                        )
+                    parts.append(f'{" " * (12 + depth * 2)}</ol>\n')
+                parts.append(f'{" " * (8 + depth * 2)}</li>\n')
+        parts.append(f'{" " * (6 + depth * 2)}</ul>\n')
+
+    parts.append('    <nav class="review-nav-tree" aria-label="Review comments navigation">\n')
+    render_tree(tree, 0)
+    parts.append("    </nav>\n")
+    parts.append('    <div class="review-nav-resizer" aria-hidden="true"></div>\n')
     parts.append("  </section>\n")
     return "".join(parts)
+
+
+def _render_story_section(comments: ReviewComments) -> str:
+    parts = ['  <section class="story" id="story"><h2>Review Story</h2>\n']
+    parts.append('    <div class="story-controls" aria-label="Story navigation">\n')
+    parts.append('      <button type="button" data-story-nav="prev">Prev</button>\n')
+    parts.append('      <span id="story-counter">1 / 1</span>\n')
+    parts.append('      <button type="button" data-story-nav="next">Next</button>\n')
+    parts.append("    </div>\n")
+    parts.append('    <ol class="story-steps">\n')
+    for index, step in enumerate(comments.story):
+        attrs = _story_step_attrs(step, index)
+        parts.append(
+            f'      <li><button type="button" class="story-step" id="{_story_anchor(step, index)}"'
+            f'{attrs}><span class="story-step-index">{index + 1:02d}</span>'
+            f'<span class="story-step-text"><strong>{_esc(step.title)}</strong></span></button></li>\n'
+        )
+    parts.append("    </ol>\n")
+    parts.append('    <div class="story-details" id="story-details">\n')
+    parts.append('      <div class="story-details-title" id="story-details-title">Details</div>\n')
+    parts.append('      <div id="story-details-body"></div>\n')
+    parts.append("    </div>\n")
+    parts.append("  </section>\n")
+    parts.append('  <button type="button" class="to-top-button" data-story-top aria-label="To top">↑</button>\n')
+    return "".join(parts)
+
+
+def _story_step_attrs(step: StoryStep, index: int) -> str:
+    attrs = [
+        f' data-story-index="{index}"',
+        f' data-story-title="{_esc(step.title)}"',
+        f' data-story-body="{_esc(step.body)}"',
+    ]
+    target = _story_target(step)
+    if target is not None:
+        attrs.append(f' data-story-target="{_esc(target)}"')
+    return "".join(attrs)
+
+
+def _story_target(step: StoryStep) -> str | None:
+    if step.comment_file_path is not None and step.comment_line is not None:
+        return _comment_anchor(step.comment_file_path, step.comment_line)
+    if step.file_path is not None and step.line is not None:
+        return _line_anchor(step.file_path, step.line)
+    if step.file_path is not None:
+        return _anchor(step.file_path)
+    return None
+
+
+def _story_anchor(step: StoryStep, index: int) -> str:
+    return f"story-{index + 1}-{_anchor(step.step_id)}"
 
 
 def _render_diagrams_section(comments: ReviewComments) -> str:
@@ -353,11 +491,13 @@ def _comments_from_payload(
     for file_path, log in file_logs.items():
         if log not in logs:
             raise DiffReportError(f"unknown log referenced by file comment {file_path}: {log}")
+    story = _story_from_payload(payload, diagrams=diagrams, logs=logs)
     return ReviewComments(
         file_comments=file_comments,
         inline_comments={key: tuple(value) for key, value in grouped.items()},
         diagrams=diagrams,
         logs=logs,
+        story=story,
         file_diagrams=file_diagrams,
         file_logs=file_logs,
         file_diagram_focus=file_diagram_focus,
@@ -365,6 +505,73 @@ def _comments_from_payload(
         file_diagram_notes=file_diagram_notes,
         summary=str(payload["summary"]) if "summary" in payload else None,
     )
+
+
+def _story_from_payload(
+    payload: dict[str, Any],
+    *,
+    diagrams: dict[str, Diagram],
+    logs: dict[str, LogAttachment],
+) -> tuple[StoryStep, ...]:
+    raw_story = payload.get("story", ())
+    if raw_story in ((), [], None):
+        return ()
+    if not isinstance(raw_story, list):
+        raise DiffReportError("comments.story must be a list")
+
+    steps: list[StoryStep] = []
+    for index, raw_step in enumerate(raw_story):
+        if not isinstance(raw_step, dict):
+            raise DiffReportError(f"comments.story[{index}] must be an object")
+        title = str(_required(raw_step, "title"))
+        body = str(raw_step.get("body", ""))
+        file_path = str(raw_step["file"]) if "file" in raw_step else None
+        line = int(raw_step["line"]) if "line" in raw_step else None
+        if line is not None and file_path is None:
+            raise DiffReportError(f"comments.story[{index}] line requires file")
+        if line is not None and line < 1:
+            raise DiffReportError(f"comments.story[{index}] line must be a positive integer")
+
+        comment_file_path: str | None = None
+        comment_line: int | None = None
+        if "comment" in raw_step:
+            raw_comment = raw_step["comment"]
+            if not isinstance(raw_comment, dict):
+                raise DiffReportError(f"comments.story[{index}].comment must be an object")
+            comment_file_path = str(_required(raw_comment, "file"))
+            comment_line = int(_required(raw_comment, "line"))
+            if comment_line < 1:
+                raise DiffReportError(
+                    f"comments.story[{index}].comment.line must be a positive integer"
+                )
+
+        diagram = str(raw_step["diagram"]) if "diagram" in raw_step else None
+        if diagram is not None and diagram not in diagrams:
+            raise DiffReportError(f"unknown diagram referenced by story step {index + 1}: {diagram}")
+        log = str(raw_step["log"]) if "log" in raw_step else None
+        if log is not None and log not in logs:
+            raise DiffReportError(f"unknown log referenced by story step {index + 1}: {log}")
+        if not any((file_path, comment_file_path, diagram, log)):
+            raise DiffReportError(
+                f"comments.story[{index}] must target a file, comment, diagram, or log"
+            )
+        steps.append(
+            StoryStep(
+                step_id=str(raw_step.get("id", f"story-step-{index + 1}")),
+                title=title,
+                body=body,
+                file_path=file_path,
+                line=line,
+                comment_file_path=comment_file_path,
+                comment_line=comment_line,
+                diagram=diagram,
+                log=log,
+                diagram_focus=_focus_terms(raw_step.get("diagram_focus", ()), field="diagram_focus"),
+                log_focus=_focus_terms(raw_step.get("log_focus", ()), field="log_focus"),
+                diagram_notes=_diagram_notes(raw_step.get("diagram_notes", ())),
+            )
+        )
+    return tuple(steps)
 
 
 def _diagrams_from_payload(
@@ -910,9 +1117,12 @@ def _render_inline_comments(
     rendered: list[str] = []
     for comment in grouped_comments.get((file_path, line), ()):
         location = _comment_location(comment)
+        start, end = comment.line_range or (comment.line, comment.line)
         rendered.append(
             '      <tr class="comment-row"><td colspan="3">'
-            f'<div class="review-comment" id="{_comment_anchor(file_path, comment.line)}">'
+            f'<div class="review-comment" id="{_comment_anchor(file_path, comment.line)}"'
+            f' data-comment-file="{_esc(file_path)}" data-comment-range-start="{start}"'
+            f' data-comment-range-end="{end}">'
             f'<div class="title">{_esc(comment.title)} on {_esc(location)}</div>'
             f'<div class="body">{_esc(comment.body)}'
             f'{_render_comment_assets(comments, comment.diagram, comment.log, comment.diagram_focus, comment.log_focus, comment.diagram_notes)}</div>'
@@ -1020,6 +1230,7 @@ def _render_diagram_modal(comments: ReviewComments) -> str:
     parts.append('        <button type="button" id="diagram-general-view" data-diagram-general hidden>General view</button>\n')
     parts.append('        <button type="button" data-diagram-search="prev" aria-label="Previous search match">Prev</button>\n')
     parts.append('        <button type="button" data-diagram-search="next" aria-label="Next search match">Next</button>\n')
+    parts.append('        <button type="button" data-theme-toggle><span data-theme-toggle-label>Theme</span></button>\n')
     parts.append('        <button type="button" data-diagram-zoom="out" data-diagram-zoom-tool aria-label="Zoom out">-</button>\n')
     parts.append(
         '        <button type="button" data-diagram-zoom="reset" data-diagram-zoom-tool aria-label="Reset zoom">'
@@ -1029,6 +1240,10 @@ def _render_diagram_modal(comments: ReviewComments) -> str:
     parts.append('        <button type="button" data-diagram-close aria-label="Close diagram">&times;</button>\n')
     parts.append("      </div>\n")
     parts.append("    </div>\n")
+    parts.append(
+        '    <div class="diagram-story-context" id="diagram-story-context" hidden>'
+        '<strong id="diagram-story-title"></strong><div id="diagram-story-body"></div></div>\n'
+    )
     parts.append('    <div class="diagram-scroll" id="diagram-modal-content"></div>\n')
     parts.append("  </div>\n")
     parts.append("</div>\n")
@@ -1081,53 +1296,186 @@ def _html_header(title: str) -> str:
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{_esc(title)}</title>
+  <script>
+    (function () {{
+      try {{
+        const key = "codex-diff-report-theme";
+        const stored = localStorage.getItem(key);
+        const fallback = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.dataset.theme = stored === "dark" || stored === "light" ? stored : fallback;
+      }} catch (error) {{
+        document.documentElement.dataset.theme = "light";
+      }}
+    }}());
+  </script>
   <style>
     :root {{
-      --bg: #f6f8fa;
+      color-scheme: light;
+      --bg: #f3f3f3;
       --panel: #ffffff;
-      --border: #d0d7de;
-      --text: #24292f;
-      --muted: #57606a;
-      --add-bg: #e6ffec;
-      --del-bg: #ffebe9;
-      --hunk-bg: #ddf4ff;
-      --comment-bg: #fff8c5;
-      --comment-border: #d4a72c;
-      --code-bg: #f6f8fa;
+      --panel-subtle: #f8f8f8;
+      --border: #d0d0d0;
+      --text: #1f1f1f;
+      --muted: #616161;
+      --link: #007acc;
+      --button-bg: #ffffff;
+      --button-hover-bg: #e5f1fb;
+      --row-bg: #ffffff;
+      --header-bg: #f3f3f3;
+      --add-bg: #e6f4ea;
+      --del-bg: #fde7e9;
+      --hunk-bg: #e5f1fb;
+      --comment-bg: #fff4ce;
+      --comment-border: #ca5010;
+      --code-bg: #f8f8f8;
+      --brand-panel: rgba(255,255,255,.9);
+      --brand-text: #1f1f1f;
+      --shadow: rgba(0,0,0,.16);
+      --diagram-bg: #ffffff;
+      --diagram-code-context-bg: rgba(255,244,206,.46);
+      --diagram-code-target-bg: rgba(255,232,166,.9);
+      --diagram-code-target-border: #ca5010;
+      --diagram-link: #107c10;
+      --diagram-link-bg: #e9f5e9;
+      --diagram-link-hover-bg: #deecf9;
+      --diagram-svg-filter: none;
+      --overlay-bg: rgba(31,35,40,.42);
+      --nav-width: 430px;
+      --left-chrome-x: 42px;
+      --left-chrome-width: calc(var(--nav-width) - 68px);
+      --story-offset: 0px;
+      --screen-body-font: clamp(22px, 0.65cm, 30px);
+      --screen-code-font: clamp(18px, 0.52cm, 24px);
+    }}
+    :root[data-theme="dark"] {{
+      color-scheme: dark;
+      --bg: #1e1e1e;
+      --panel: #252526;
+      --panel-subtle: #2d2d30;
+      --border: #3c3c3c;
+      --text: #d4d4d4;
+      --muted: #858585;
+      --link: #3794ff;
+      --button-bg: #2d2d30;
+      --button-hover-bg: #094771;
+      --row-bg: #1e1e1e;
+      --header-bg: #252526;
+      --add-bg: #113311;
+      --del-bg: #3f1d1d;
+      --hunk-bg: #063b49;
+      --comment-bg: #3a3217;
+      --comment-border: #cca700;
+      --code-bg: #1e1e1e;
+      --brand-panel: rgba(37,37,38,.94);
+      --brand-text: #d4d4d4;
+      --shadow: rgba(0,0,0,.45);
+      --diagram-bg: #1e1e1e;
+      --diagram-code-context-bg: rgba(55,65,81,.55);
+      --diagram-code-target-bg: rgba(14,99,156,.5);
+      --diagram-code-target-border: #3794ff;
+      --diagram-link: #4ec9b0;
+      --diagram-link-bg: #173f3a;
+      --diagram-link-hover-bg: #094771;
+      --diagram-svg-filter: invert(1) hue-rotate(180deg) saturate(.88) brightness(1.08);
+      --overlay-bg: rgba(0,0,0,.68);
     }}
     * {{ box-sizing: border-box; }}
-    body {{ margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
-    main {{ width: min(1280px, calc(100% - 32px)); margin: 24px auto; }}
+    body {{ margin: 0; background: var(--bg); color: var(--text); font: var(--screen-body-font)/1.52 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
+    main {{ width: calc(100% - var(--nav-width) - 24px); margin: 8px 8px 16px calc(var(--nav-width) + 16px); }}
+    .report-brand {{ position: fixed; left: 8px; top: 8px; z-index: 4; display: flex; align-items: center; justify-content: center; width: var(--nav-width); height: max(200px, calc(var(--story-offset) - 16px)); pointer-events: none; color: var(--brand-text); }}
+    .report-brand-inner {{ display: grid; grid-template-columns: 144px minmax(0, 1fr); align-items: center; gap: 28px; width: var(--left-chrome-width); height: 176px; padding: 16px 28px; border: 1px solid rgba(208,215,222,.85); border-radius: 10px; background: var(--brand-panel); box-shadow: 0 10px 24px var(--shadow); font-weight: 800; letter-spacing: 0; }}
+    .report-brand-mark {{ display: flex; align-items: center; justify-content: center; width: 144px; height: 144px; border-radius: 10px; background: #0969da; color: #fff; font: 800 92px/1 ui-monospace, SFMono-Regular, Consolas, monospace; }}
+    .report-brand-text {{ display: grid; gap: 2px; min-width: 0; line-height: 1.05; }}
+    .report-brand-title {{ font-size: 80px; white-space: nowrap; }}
+    .report-brand-subtitle {{ color: var(--muted); font-size: 40px; white-space: nowrap; }}
+    .theme-toggle {{ position: fixed; left: var(--left-chrome-x); top: max(214px, calc(var(--story-offset) - 56px)); z-index: 9; display: inline-flex; align-items: center; justify-content: center; width: var(--left-chrome-width); height: 44px; padding: 0 18px; border: 1px solid var(--border); border-radius: 999px; background: var(--button-bg); color: var(--link); box-shadow: 0 10px 28px var(--shadow); cursor: pointer; font: 800 18px/1 ui-monospace, SFMono-Regular, Consolas, monospace; }}
+    .theme-toggle:hover {{ border-color: var(--link); box-shadow: 0 12px 32px rgba(9,105,218,.22); }}
+    .scroll-spacer {{ height: 200vh; }}
     header, section, .file {{ background: var(--panel); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 16px; }}
+    .file {{ border-top: 0; }}
     header, section {{ padding: 20px; }}
     h1, h2 {{ margin: 0 0 12px; line-height: 1.2; }}
-    h1 {{ font-size: 26px; }}
-    h2 {{ font-size: 18px; }}
+    h1 {{ font-size: 28px; }}
+    h2 {{ font-size: 20px; }}
     p {{ margin: 0 0 10px; }}
     .review-summary {{ white-space: pre-line; }}
     .commit-message {{ margin: 0; padding: 12px; background: var(--code-bg); border-radius: 6px; white-space: pre-wrap; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }}
     code {{ background: rgba(175,184,193,.2); border-radius: 4px; padding: 1px 5px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }}
     pre.stat {{ margin: 10px 0 0; padding: 12px; background: var(--code-bg); border-radius: 6px; overflow-x: auto; }}
     .meta {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; margin-top: 14px; }}
-    .meta div {{ border: 1px solid var(--border); border-radius: 6px; padding: 10px; background: #fbfcfe; }}
-    .label {{ display: block; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 3px; }}
-    .toc a {{ display: inline-block; margin: 0 8px 8px 0; color: #0969da; text-decoration: none; }}
+    .meta div {{ border: 1px solid var(--border); border-radius: 6px; padding: 10px; background: var(--panel-subtle); }}
+    .label {{ display: block; color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 3px; }}
+    .toc a {{ display: inline-block; margin: 0 8px 8px 0; color: var(--link); text-decoration: none; }}
     .toc a:hover {{ text-decoration: underline; }}
-    .comment-index {{ margin: 0 0 16px; padding-left: 22px; }}
-    .comment-index li {{ margin: 0 0 8px; }}
-    .comment-index a {{ color: #0969da; text-decoration: none; }}
-    .comment-index a:hover {{ text-decoration: underline; }}
-    .file-header {{ padding: 10px 12px; border-bottom: 1px solid var(--border); background: #f6f8fa; font-weight: 700; position: sticky; top: 0; z-index: 1; }}
-    .file-comment {{ margin: 10px 12px; padding: 10px 12px; border-left: 4px solid var(--comment-border); background: var(--comment-bg); border-radius: 6px; }}
-    table.diff {{ width: 100%; border-collapse: collapse; table-layout: fixed; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12.5px; }}
+    .review-nav {{ position: fixed; left: 8px; top: max(270px, var(--story-offset)); bottom: 8px; z-index: 8; width: var(--nav-width); margin: 0; padding: 10px 14px 10px 10px; overflow: auto; box-shadow: 0 8px 22px rgba(31,35,40,.10); }}
+    .review-nav-head {{ position: sticky; top: -10px; z-index: 2; display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: -10px -14px 8px -10px; padding: 10px 14px 8px 10px; background: var(--panel); border-bottom: 1px solid var(--border); box-shadow: 0 2px 0 var(--panel); }}
+    .review-nav h2 {{ margin: 0; font-size: .86em; }}
+    .review-nav-head button {{ display: inline-flex; align-items: center; justify-content: center; min-width: 102px; height: 28px; padding: 0 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--button-bg); color: var(--text); cursor: pointer; font: var(--screen-code-font)/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
+    .review-nav-head button:hover {{ border-color: var(--link); color: var(--link); }}
+    .review-nav-tree {{ display: block; }}
+    .review-nav [hidden] {{ display: none !important; }}
+    .review-nav-children {{ display: block; margin: 0; padding: 0 0 0 14px; list-style: none; border-left: 1px solid rgba(208,215,222,.9); }}
+    .review-nav-node {{ min-width: 0; }}
+    .review-nav-node:not(.is-open) > .review-nav-children, .review-nav-node:not(.is-open) > .review-nav-comments {{ display: none; }}
+    .review-nav-row {{ display: grid; grid-template-columns: 1em minmax(0, 1fr); gap: 2px; align-items: baseline; min-width: 0; padding: 3px 4px; border-radius: 4px; font-weight: 700; line-height: 1.18; }}
+    .review-nav-row:hover {{ background: var(--button-hover-bg); }}
+    .review-nav-file.is-current > .review-nav-row {{ background: var(--button-hover-bg); box-shadow: inset 4px 0 0 var(--link); }}
+    .review-nav-file.is-current > .review-nav-row .review-nav-label {{ color: var(--text); }}
+    .review-nav-toggle {{ display: inline-flex; align-items: center; justify-content: center; width: 1em; height: 1.18em; padding: 0; border: 0; background: transparent; color: var(--muted); cursor: pointer; font: inherit; line-height: 1; }}
+    .review-nav-toggle-spacer {{ display: inline-block; width: 1em; }}
+    .review-nav-twist::before {{ content: ">"; display: inline-block; width: 1em; color: var(--muted); }}
+    .review-nav-node.is-open > .review-nav-row .review-nav-twist::before {{ content: "v"; }}
+    .review-nav a {{ color: var(--link); text-decoration: none; }}
+    .review-nav a:hover {{ text-decoration: underline; }}
+    .review-nav-label {{ min-width: 0; font-weight: 700; white-space: normal; overflow-wrap: anywhere; word-break: normal; hyphens: none; }}
+    .review-nav-comments {{ display: block; margin: 3px 0 2px 18px; padding: 0; list-style: none; }}
+    .review-nav-comments a {{ display: grid; grid-template-columns: 3.2em minmax(0, 1fr); gap: 6px; align-items: baseline; padding: 4px 4px; border-radius: 4px; font-size: .78em; line-height: 1.25; overflow-wrap: anywhere; }}
+    .review-nav-comments a:hover {{ background: var(--button-hover-bg); text-decoration: none; }}
+    .review-nav-line {{ color: var(--muted); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }}
+    .review-nav-resizer {{ position: fixed; left: calc(var(--nav-width) + 5px); top: max(270px, var(--story-offset)); bottom: 8px; width: 10px; cursor: ew-resize; z-index: 20; }}
+    .review-nav-resizer::before {{ content: ""; position: absolute; inset: 0 3px; border-radius: 99px; background: transparent; }}
+    .review-nav-resizer:hover::before, body.is-resizing-review-nav .review-nav-resizer::before {{ background: rgba(9,105,218,.38); }}
+    body.is-resizing-review-nav {{ cursor: ew-resize; user-select: none; }}
+    .story {{ position: sticky; top: 0; z-index: 12; padding: 10px 12px; margin-bottom: 0; border-bottom: 0; border-bottom-left-radius: 0; border-bottom-right-radius: 0; box-shadow: 0 8px 22px rgba(31,35,40,.08); }}
+    .story h2 {{ margin: 0; font-size: var(--screen-code-font); }}
+    .story-controls {{ display: flex; align-items: center; justify-content: flex-end; gap: 6px; margin: -22px 0 8px; }}
+    .story-controls button {{ display: inline-flex; align-items: center; justify-content: center; min-width: 54px; height: 28px; padding: 0 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--button-bg); color: var(--text); cursor: pointer; font: inherit; line-height: 1; }}
+    .story-controls button:hover {{ border-color: var(--link); color: var(--link); }}
+    .to-top-button {{ position: fixed; right: 24px; bottom: 24px; z-index: 32; display: inline-flex; align-items: center; justify-content: center; width: 58px; height: 58px; border: 1px solid var(--border); border-radius: 999px; background: var(--button-bg); color: var(--link); box-shadow: 0 10px 28px var(--shadow); cursor: pointer; opacity: 0; visibility: hidden; pointer-events: none; transform: translateY(10px) scale(.96); transition: opacity .18s ease, transform .18s ease, visibility 0s linear .18s, border-color .12s ease, box-shadow .12s ease; font-size: 0; }}
+    .to-top-button::before {{ content: ""; width: 15px; height: 15px; border-left: 4px solid currentColor; border-top: 4px solid currentColor; transform: translateY(4px) rotate(45deg); border-radius: 2px; }}
+    .to-top-button:hover {{ border-color: var(--link); box-shadow: 0 12px 32px rgba(9,105,218,.22); transform: translateY(0) scale(1.03); }}
+    body.has-left-top .to-top-button {{ opacity: 1; visibility: visible; pointer-events: auto; transform: translateY(0) scale(1); transition-delay: 0s; }}
+    #story-counter {{ color: var(--muted); min-width: 44px; text-align: center; font-size: var(--screen-code-font); }}
+    .story-steps {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); align-items: stretch; gap: 6px; margin: 0; padding: 0; list-style: none; }}
+    .story-steps li {{ min-width: 0; }}
+    .story-step {{ display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 7px; align-items: center; width: 100%; height: 100%; min-height: 42px; padding: 7px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--button-bg); color: inherit; text-align: left; cursor: pointer; font: inherit; }}
+    .story-step:hover {{ border-color: var(--link); box-shadow: 0 0 0 2px rgba(9,105,218,.12); }}
+    .story-step.is-active {{ border-color: var(--link); background: var(--button-hover-bg); box-shadow: inset 4px 0 0 var(--link); }}
+    .story-step-index {{ color: var(--muted); font: 700 var(--screen-code-font)/1.35 ui-monospace, SFMono-Regular, Consolas, monospace; }}
+    .story-step-text {{ display: grid; gap: 3px; min-width: 0; }}
+    .story-step-text strong {{ display: -webkit-box; overflow: hidden; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; font-size: var(--screen-code-font); line-height: 1.25; }}
+    .story-details {{ margin-top: 7px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel-subtle); }}
+    .story-details-title {{ padding: 7px 8px; font-size: var(--screen-code-font); font-weight: 700; }}
+    .story-details div:not(.story-details-title) {{ padding: 0 8px 8px; color: var(--muted); font-size: var(--screen-code-font); line-height: 1.35; white-space: pre-line; overflow-wrap: anywhere; }}
+    .story-target-active {{ outline: 3px solid rgba(9,105,218,.35); outline-offset: 2px; scroll-margin-top: calc(var(--story-offset) + 72px); }}
+    .story-target-flash {{ animation: story-target-flash .4s ease-out; }}
+    tr.code-target-flash .code {{ animation: code-target-flash .4s ease-out; }}
+    tr.code-target-flash .code {{ box-shadow: inset 4px 0 0 rgba(9,105,218,.85), inset -3px 0 0 rgba(9,105,218,.55); }}
+    tr.code-target-flash-start .code {{ box-shadow: inset 4px 0 0 rgba(9,105,218,.85), inset -3px 0 0 rgba(9,105,218,.55), inset 0 3px 0 rgba(9,105,218,.75); }}
+    tr.code-target-flash-end .code {{ box-shadow: inset 4px 0 0 rgba(9,105,218,.85), inset -3px 0 0 rgba(9,105,218,.55), inset 0 -3px 0 rgba(9,105,218,.45); }}
+    tr.code-target-flash-start.code-target-flash-end .code {{ box-shadow: inset 4px 0 0 rgba(9,105,218,.85), inset -3px 0 0 rgba(9,105,218,.55), inset 0 3px 0 rgba(9,105,218,.75), inset 0 -3px 0 rgba(9,105,218,.45); }}
+    .file, .file-comment, .review-comment, tr[id] {{ scroll-margin-top: calc(var(--story-offset) + 72px); }}
+    .file-header {{ margin: -1px -1px 0; padding: 10px 13px; border-bottom: 1px solid var(--border); background: var(--header-bg); font-weight: 700; position: sticky; top: calc(var(--story-offset) - 2px); z-index: 6; box-shadow: 0 1px 0 var(--border); }}
+    .file-comment {{ margin: 6px 12px 6px; padding: 8px 12px; border-left: 4px solid var(--comment-border); background: var(--comment-bg); border-radius: 6px; }}
+    table.diff {{ width: 100%; border-collapse: collapse; table-layout: fixed; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: var(--screen-code-font); line-height: 1.5; }}
     .diff td {{ vertical-align: top; border: 0; padding: 0; }}
-    .num {{ width: 56px; padding: 0 8px !important; color: var(--muted); text-align: right; user-select: none; border-right: 1px solid var(--border) !important; }}
+    .num {{ width: 64px; padding: 0 10px !important; color: var(--muted); text-align: right; user-select: none; border-right: 1px solid var(--border) !important; }}
     .code {{ white-space: pre-wrap; overflow-wrap: anywhere; padding: 0 10px !important; }}
     tr.add .num, tr.add .code {{ background: var(--add-bg); }}
     tr.del .num, tr.del .code {{ background: var(--del-bg); }}
-    tr.ctx .num, tr.ctx .code {{ background: #fff; }}
+    tr.ctx .num, tr.ctx .code {{ background: var(--row-bg); }}
     tr.hunk .num, tr.hunk .code {{ background: var(--hunk-bg); color: #0969da; }}
-    tr.header .num, tr.header .code {{ background: #f6f8fa; color: var(--muted); font-weight: 700; }}
+    tr.header .num, tr.header .code {{ background: var(--header-bg); color: var(--muted); font-weight: 700; }}
     tr.comment-target .num, tr.comment-target .code {{ background: #fffdf0; }}
     tr.comment-target.add .num, tr.comment-target.add .code {{ background: linear-gradient(to right, rgba(255,248,197,.46), rgba(255,248,197,.46)), var(--add-bg); }}
     tr.comment-target .num:first-child {{ box-shadow: inset 4px 0 0 var(--comment-border); }}
@@ -1141,56 +1489,59 @@ def _html_header(title: str) -> str:
     .review-comment::before {{ content: ""; position: absolute; top: -7px; left: -4px; width: 4px; height: 7px; background: var(--comment-border); }}
     .review-comment .title {{ padding: 8px 10px; font-weight: 700; border-bottom: 1px solid rgba(212,167,44,.35); background: rgba(255,255,255,.38); }}
     .review-comment .body {{ padding: 9px 10px; }}
-    .diagram-list {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }}
+    .diagram-list {{ display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: flex-start; gap: 12px; }}
     .diagram-preview-wrap {{ margin-top: 10px; }}
-    .diagram-preview {{ display: block; width: min(420px, 100%); border: 1px solid var(--border); border-radius: 6px; background: #fff; padding: 0; text-align: left; cursor: zoom-in; overflow: hidden; color: inherit; }}
-    .diagram-preview:hover {{ border-color: #0969da; box-shadow: 0 0 0 2px rgba(9,105,218,.12); }}
-    .diagram-preview-title {{ display: block; padding: 7px 9px; border-bottom: 1px solid var(--border); background: #f6f8fa; font-weight: 700; }}
-    .diagram-preview-canvas {{ display: flex; align-items: center; justify-content: center; height: 180px; padding: 10px; overflow: hidden; background: #fff; }}
-    .diagram-preview-canvas svg {{ max-width: 100%; max-height: 100%; width: auto; height: auto; }}
+    .diagram-preview {{ display: block; width: min(420px, 100%); border: 1px solid var(--border); border-radius: 6px; background: var(--button-bg); padding: 0; text-align: left; cursor: zoom-in; overflow: hidden; color: inherit; }}
+    .diagram-preview:hover {{ border-color: var(--link); box-shadow: 0 0 0 2px rgba(9,105,218,.12); }}
+    .diagram-preview-title {{ display: block; padding: 7px 9px; border-bottom: 1px solid var(--border); background: var(--header-bg); font-weight: 700; }}
+    .diagram-preview-canvas {{ display: flex; align-items: center; justify-content: center; height: 180px; padding: 10px; overflow: hidden; background: var(--diagram-bg); }}
+    .diagram-preview-canvas svg {{ max-width: 100%; max-height: 100%; width: auto; height: auto; filter: var(--diagram-svg-filter); }}
     .log-preview {{ cursor: pointer; }}
     .log-preview-text {{ height: 180px; margin: 0; padding: 10px; overflow: hidden; background: #0d1117; color: #e6edf3; font: 12px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; text-align: left; }}
     .diagram-modal[hidden] {{ display: none; }}
     .diagram-modal {{ position: fixed; inset: 0; z-index: 1000; }}
     .diagram-backdrop {{ position: absolute; inset: 0; background: rgba(31,35,40,.55); }}
-    .diagram-dialog {{ position: absolute; inset: 32px; display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 16px 48px rgba(31,35,40,.28); }}
-    .diagram-toolbar {{ display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-bottom: 1px solid var(--border); background: #f6f8fa; }}
+    .diagram-dialog {{ position: absolute; inset: max(32px, 5vh) max(32px, 5vw); display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 16px 48px rgba(31,35,40,.28); }}
+    .diagram-toolbar {{ display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-bottom: 1px solid var(--border); background: var(--header-bg); }}
     .diagram-toolbar h2 {{ margin: 0; font-size: 16px; }}
     .diagram-tools {{ display: flex; align-items: center; gap: 6px; }}
     .diagram-tools input {{ width: 220px; height: 32px; border: 1px solid var(--border); border-radius: 6px; padding: 0 9px; font: inherit; }}
-    .diagram-search-count {{ min-width: 54px; color: var(--muted); font-size: 12px; text-align: center; }}
-    .diagram-tools button {{ min-width: 36px; height: 32px; border: 1px solid var(--border); border-radius: 6px; background: #fff; cursor: pointer; font: inherit; }}
-    .diagram-tools button:hover {{ border-color: #0969da; color: #0969da; }}
-    .diagram-scroll {{ position: relative; flex: 1; min-height: 0; overflow: auto; padding: 18px; background: #fff; }}
-    .diagram-code-overlay {{ position: absolute; z-index: 4; display: flex; align-items: center; justify-content: center; padding: 28px; background: rgba(31,35,40,.42); box-sizing: border-box; }}
-    .diagram-code-popover {{ width: min(820px, 100%); max-height: min(620px, 100%); border: 1px solid var(--border); border-radius: 8px; background: #fff; box-shadow: 0 12px 32px rgba(31,35,40,.24); overflow: hidden; }}
+    .diagram-search-count {{ min-width: 54px; color: var(--muted); font-size: 13px; text-align: center; }}
+    .diagram-tools button {{ display: inline-flex; align-items: center; justify-content: center; min-width: 36px; height: 32px; padding: 0 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--button-bg); color: var(--text); cursor: pointer; font: inherit; line-height: 1; }}
+    .diagram-tools button:hover {{ border-color: var(--link); color: var(--link); }}
+    .diagram-story-context {{ padding: 9px 12px; border-bottom: 1px solid var(--border); background: var(--button-hover-bg); }}
+    .diagram-story-context[hidden] {{ display: none; }}
+    .diagram-story-context strong {{ display: block; margin-bottom: 3px; }}
+    .diagram-story-context div {{ color: var(--muted); font-size: 13px; white-space: pre-line; overflow-wrap: anywhere; }}
+    .diagram-scroll {{ position: relative; flex: 1; min-height: 0; overflow: auto; padding: 18px; background: var(--diagram-bg); }}
+    .diagram-code-overlay {{ position: absolute; z-index: 4; display: flex; align-items: center; justify-content: center; padding: 10px; background: var(--overlay-bg); box-sizing: border-box; }}
+    .diagram-code-popover {{ width: min(50vw, calc(100% - 20px)); height: min(76vh, calc(100% - 20px)); border: 1px solid var(--border); border-radius: 8px; background: var(--panel); box-shadow: 0 12px 32px var(--shadow); overflow: hidden; display: flex; flex-direction: column; }}
     .diagram-code-overlay[hidden] {{ display: none; }}
-    .diagram-code-popover-header {{ display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-bottom: 1px solid var(--border); background: #f6f8fa; }}
+    .diagram-code-popover-header {{ display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-bottom: 1px solid var(--border); background: var(--header-bg); }}
     .diagram-code-popover-title {{ font-weight: 700; }}
-    .diagram-code-popover-close {{ width: 30px; height: 30px; border: 1px solid var(--border); border-radius: 6px; background: #fff; cursor: pointer; font: inherit; }}
-    .diagram-code-popover-close:hover {{ border-color: #0969da; color: #0969da; }}
-    .diagram-code-popover-body {{ max-height: min(540px, calc(100vh - 260px)); padding: 10px 12px; overflow: auto; }}
-    .diagram-code-link-item {{ display: block; margin: 0 0 10px; padding: 9px; border: 1px solid var(--border); border-radius: 6px; background: #fff; color: inherit; }}
+    .diagram-code-popover-close {{ display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; padding: 0; border: 1px solid var(--border); border-radius: 6px; background: var(--button-bg); color: var(--text); cursor: pointer; font: inherit; line-height: 1; }}
+    .diagram-code-popover-close:hover {{ border-color: var(--link); color: var(--link); }}
+    .diagram-code-popover-body {{ flex: 1; min-height: 0; padding: 10px 12px; overflow: auto; }}
+    .diagram-code-link-item {{ display: block; margin: 0 0 10px; padding: 9px; border: 1px solid var(--border); border-radius: 6px; background: var(--button-bg); color: inherit; }}
     .diagram-code-link-title {{ display: block; font-weight: 700; margin-bottom: 4px; }}
-    .diagram-code-link-location {{ display: block; color: var(--muted); font: 12px/1.35 ui-monospace, SFMono-Regular, Consolas, monospace; margin-bottom: 6px; }}
-    .diagram-code-link-code {{ display: block; max-height: 390px; overflow: auto; padding: 8px; border-radius: 4px; background: var(--code-bg); font: 12px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre; }}
-    .diagram-code-line {{ display: block; min-width: max-content; padding: 0 4px; }}
-    .diagram-code-context-line {{ background: rgba(255,248,197,.36); }}
-    .diagram-code-target-line {{ background: rgba(255,223,93,.82); border-left: 3px solid #9a6700; padding-left: 1px; font-weight: 700; }}
+    .diagram-code-link-location {{ display: block; color: var(--muted); font: 13px/1.35 ui-monospace, SFMono-Regular, Consolas, monospace; margin-bottom: 6px; }}
+    .diagram-code-link-code {{ display: block; max-height: none; overflow: visible; padding: 8px; border-radius: 4px; background: var(--code-bg); font: var(--screen-code-font)/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }}
+    .diagram-code-line {{ display: block; min-width: 0; padding: 0 4px; white-space: pre-wrap; overflow-wrap: anywhere; }}
+    .diagram-code-context-line {{ background: var(--diagram-code-context-bg); }}
+    .diagram-code-target-line {{ background: var(--diagram-code-target-bg); border-left: 3px solid var(--diagram-code-target-border); padding-left: 1px; font-weight: 700; }}
     .diagram-scroll[data-mode="diagram"] .diagram-zoom-stage {{ cursor: grab; }}
     .diagram-scroll.is-panning, .diagram-scroll.is-panning .diagram-zoom-stage {{ cursor: grabbing; user-select: none; }}
     .diagram-zoom-stage {{ transform-origin: 0 0; width: max-content; min-width: 100%; }}
-    .diagram-zoom-stage svg {{ display: block; max-width: none; height: auto; }}
-    .log-view-text {{ margin: 0; min-width: 100%; color: #e6edf3; background: #0d1117; padding: 14px; border-radius: 6px; font: 12.5px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }}
+    .diagram-zoom-stage svg {{ display: block; max-width: none; height: auto; filter: var(--diagram-svg-filter); }}
+    .log-view-text {{ margin: 0; min-width: 100%; color: #e6edf3; background: #0d1117; padding: 14px; border-radius: 6px; font: 13.5px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }}
     .asset-focus-line {{ display: block; margin: 0 -4px; padding: 0 4px; background: rgba(255, 171, 112, .32); border-left: 3px solid #fb8500; }}
     mark.asset-search-match {{ background: #fff8c5; color: inherit; padding: 0 1px; border-radius: 2px; }}
     mark.asset-search-current {{ background: #ffab70; outline: 1px solid #fb8500; }}
-    svg .asset-focus-box {{ fill: rgba(219, 234, 254, .68); stroke: #2563eb; stroke-width: 2px; rx: 4px; ry: 4px; }}
     svg .asset-focus-connector {{ stroke: #1d4ed8 !important; stroke-width: 3px !important; opacity: .95; filter: drop-shadow(0 0 2px rgba(255,255,255,.95)); }}
     svg line.asset-focus-connector, svg path.asset-focus-connector, svg polyline.asset-focus-connector {{ stroke-dasharray: 10 7; animation: focus-dash-flow 1.1s linear infinite; }}
     svg line.asset-focus-connector-reverse, svg path.asset-focus-connector-reverse, svg polyline.asset-focus-connector-reverse {{ animation-name: focus-dash-flow-reverse; }}
     svg polygon.asset-focus-connector {{ fill: #1d4ed8 !important; opacity: .95; filter: drop-shadow(0 0 2px rgba(255,255,255,.95)); animation: focus-arrow-pulse 1.1s ease-in-out infinite; }}
-    svg .asset-focus-match {{ fill: #111827; stroke: none; font-weight: 800; }}
+    svg .asset-focus-match {{ fill: #1d4ed8; stroke: none; }}
     svg .diagram-note-panel {{ opacity: 0; pointer-events: none; transition: opacity .12s ease; }}
     svg .diagram-note-hover .diagram-note-panel, svg .diagram-note-hotspot:hover .diagram-note-panel {{ opacity: 1; pointer-events: auto; }}
     svg .diagram-note-box {{ fill: #f8fafc; stroke: #2563eb; stroke-width: 1.8px; rx: 6px; ry: 6px; filter: drop-shadow(0 2px 4px rgba(15,23,42,.22)); }}
@@ -1203,30 +1554,633 @@ def _html_header(title: str) -> str:
     svg .diagram-note-hover .diagram-note-marker, svg .diagram-note-hotspot:hover .diagram-note-marker {{ fill: #dbeafe; stroke: #1d4ed8; stroke-width: 2.4px; }}
     svg .diagram-note-hover .diagram-note-link, svg .diagram-note-hotspot:hover .diagram-note-link {{ stroke: #1d4ed8; stroke-width: 2.1px; opacity: 1; }}
     svg .diagram-note-hover .diagram-note-text, svg .diagram-note-hotspot:hover .diagram-note-text {{ fill: #1e3a8a; }}
-    svg .diagram-code-link-target {{ cursor: pointer; fill: #047857 !important; text-decoration: underline; text-decoration-thickness: 1.5px; }}
-    svg .diagram-code-link-connector {{ cursor: pointer; stroke: #047857 !important; stroke-width: 2.6px !important; opacity: .96; }}
-    svg polygon.diagram-code-link-connector {{ fill: #047857 !important; }}
-    svg .diagram-code-link-hit-area {{ cursor: pointer; fill: rgba(29,78,216,.01) !important; stroke: rgba(29,78,216,.01) !important; stroke-width: 1px !important; opacity: .01; pointer-events: all; }}
-    svg .diagram-code-link-hover {{ stroke: #1d4ed8 !important; fill: #1d4ed8 !important; opacity: 1 !important; filter: drop-shadow(0 0 2px rgba(255,255,255,.95)); }}
-    svg text.diagram-code-link-hover, svg tspan.diagram-code-link-hover {{ fill: #1e3a8a !important; stroke: none !important; font-weight: 800; }}
-    svg .diagram-code-link-hit-area.diagram-code-link-hover {{ stroke: rgba(29,78,216,.01) !important; fill: rgba(29,78,216,.01) !important; opacity: .01 !important; filter: none; }}
+    svg .diagram-code-link-target {{ fill: var(--diagram-link) !important; text-decoration: underline; text-decoration-thickness: 1.5px; }}
+    svg .diagram-code-link-connector {{ stroke: var(--diagram-link) !important; stroke-width: 2.6px !important; opacity: .96; }}
+    svg polygon.diagram-code-link-connector {{ fill: var(--diagram-link) !important; }}
+    svg .diagram-code-link-badge {{ cursor: pointer; }}
+    svg .diagram-code-link-badge rect {{ fill: var(--diagram-link-bg); stroke: var(--diagram-link); stroke-width: 1.4px; rx: 5px; ry: 5px; filter: drop-shadow(0 1px 2px rgba(15,23,42,.18)); }}
+    svg .diagram-code-link-badge text {{ fill: var(--diagram-link); font: 700 11px ui-monospace, SFMono-Regular, Consolas, monospace; text-anchor: middle; dominant-baseline: central; pointer-events: none; }}
+    svg .diagram-code-link-badge.diagram-code-link-hover rect {{ fill: var(--diagram-link-hover-bg); stroke: #1d4ed8; }}
+    svg .diagram-code-link-badge.diagram-code-link-hover text {{ fill: #1d4ed8; }}
     svg .diagram-code-link-active {{ filter: drop-shadow(0 0 3px rgba(4,120,87,.65)); }}
     svg .asset-focus-connector.diagram-code-link-connector {{ stroke: #1d4ed8 !important; stroke-width: 3px !important; opacity: .95; }}
     svg polygon.asset-focus-connector.diagram-code-link-connector {{ fill: #1d4ed8 !important; }}
-    svg text.asset-focus-match.diagram-code-link-target, svg tspan.asset-focus-match.diagram-code-link-target {{ fill: #1e3a8a !important; stroke: none !important; font-weight: 800; }}
+    svg text.asset-focus-match.diagram-code-link-target, svg tspan.asset-focus-match.diagram-code-link-target {{ fill: #1e3a8a !important; stroke: none !important; }}
     svg .asset-focus-related-hover {{ stroke: #1d4ed8 !important; fill: #1d4ed8 !important; opacity: 1 !important; filter: drop-shadow(0 0 2px rgba(255,255,255,.95)); }}
     svg text.asset-focus-related-hover, svg tspan.asset-focus-related-hover {{ fill: #1e3a8a !important; stroke: none !important; }}
-    svg .asset-search-match {{ fill: #cf222e; stroke: #cf222e; font-weight: 700; }}
+    svg .asset-search-match {{ fill: #cf222e; stroke: #cf222e; }}
     svg .asset-search-current {{ filter: drop-shadow(0 0 3px #fb8500); }}
     @keyframes focus-dash-flow {{ from {{ stroke-dashoffset: 0; }} to {{ stroke-dashoffset: -17; }} }}
     @keyframes focus-dash-flow-reverse {{ from {{ stroke-dashoffset: 0; }} to {{ stroke-dashoffset: 17; }} }}
     @keyframes focus-arrow-pulse {{ 0%, 100% {{ opacity: .55; }} 50% {{ opacity: .9; }} }}
+    @keyframes story-target-flash {{ 0% {{ box-shadow: 0 0 0 0 rgba(9,105,218,.75), inset 0 0 0 3px rgba(9,105,218,.8); filter: saturate(1.28) brightness(1.03); }} 55% {{ box-shadow: 0 0 0 10px rgba(9,105,218,.22), inset 0 0 0 2px rgba(9,105,218,.5); filter: saturate(1.12) brightness(1.01); }} 100% {{ box-shadow: 0 0 0 16px rgba(9,105,218,0), inset 0 0 0 0 rgba(9,105,218,0); filter: saturate(1) brightness(1); }} }}
+    @keyframes code-target-flash {{ 0% {{ outline: 3px solid rgba(9,105,218,.85); outline-offset: -2px; filter: saturate(1.28) brightness(1.03); font-weight: 800; }} 45% {{ outline: 2px solid rgba(9,105,218,.55); outline-offset: -1px; filter: saturate(1.16) brightness(1.01); font-weight: 650; }} 100% {{ outline: 0 solid rgba(9,105,218,0); outline-offset: 0; filter: saturate(1) brightness(1); font-weight: 400; }} }}
     @media (prefers-reduced-motion: reduce) {{
       svg line.asset-focus-connector, svg path.asset-focus-connector, svg polyline.asset-focus-connector, svg polygon.asset-focus-connector {{ animation: none; }}
+      .story-target-flash, tr.code-target-flash .code {{ animation: none; }}
+    }}
+    @media (max-width: 1100px) {{
+      body {{ font-size: 18px; }}
+      main {{ width: calc(100% - 16px); margin: 8px auto 16px; }}
+      .report-brand {{ display: none; }}
+      .theme-toggle {{ left: auto; right: 16px; top: 16px; z-index: 33; }}
+      .review-nav {{ position: static; width: calc(100% - 16px); max-height: 38vh; margin: 8px auto 16px; }}
+      .review-nav-resizer {{ display: none; }}
+      .story {{ top: 0; }}
     }}
   </style>
 </head>
 <body>
+<div class="report-brand" aria-hidden="true"><div class="report-brand-inner"><span class="report-brand-mark">AI</span><span class="report-brand-text"><span class="report-brand-title">Diff</span><span class="report-brand-subtitle">report</span></span></div></div>
+<button type="button" class="theme-toggle" data-theme-toggle aria-label="Toggle theme"><span data-theme-toggle-label>Theme</span></button>
+"""
+
+
+def _theme_script() -> str:
+    return """<script>
+(function () {
+  const key = "codex-diff-report-theme";
+  const root = document.documentElement;
+  const toggles = Array.from(document.querySelectorAll("[data-theme-toggle]"));
+
+  function currentTheme() {
+    return root.dataset.theme === "dark" ? "dark" : "light";
+  }
+
+  function applyTheme(theme, persist) {
+    const nextTheme = theme === "dark" ? "dark" : "light";
+    root.dataset.theme = nextTheme;
+    for (const toggle of toggles) {
+      const label = toggle.querySelector("[data-theme-toggle-label]");
+      if (label) {
+        label.textContent = nextTheme === "dark" ? "Light" : "Dark";
+      }
+      toggle.setAttribute("aria-label", "Switch to " + (nextTheme === "dark" ? "light" : "dark") + " theme");
+      toggle.setAttribute("aria-pressed", nextTheme === "dark" ? "true" : "false");
+    }
+    if (persist) {
+      try {
+        localStorage.setItem(key, nextTheme);
+      } catch (error) {
+        // Ignore storage failures, for example in restricted file viewers.
+      }
+    }
+  }
+
+  applyTheme(currentTheme(), false);
+  for (const toggle of toggles) {
+    toggle.addEventListener("click", function () {
+      applyTheme(currentTheme() === "dark" ? "light" : "dark", true);
+    });
+  }
+}());
+</script>
+"""
+
+
+def _story_script() -> str:
+    return """<script>
+(function () {
+  const steps = Array.from(document.querySelectorAll("[data-story-index]"));
+  if (!steps.length) {
+    return;
+  }
+  const counter = document.getElementById("story-counter");
+  const detailsTitle = document.getElementById("story-details-title");
+  const detailsBody = document.getElementById("story-details-body");
+  const jumpDurationMs = 0;
+  let activeIndex = 0;
+  let activeTarget = null;
+  let activeScrollTimer = 0;
+  let activeScrollEndTimer = 0;
+  let activeFlashClearTimer = 0;
+  let navigationToken = 0;
+  let topStateRaf = 0;
+  if ("scrollRestoration" in history) {
+    history.scrollRestoration = "manual";
+  }
+
+  function initReviewNavResize() {
+    const nav = document.getElementById("review-comments");
+    const resizer = nav ? nav.querySelector(".review-nav-resizer") : null;
+    if (!nav || !resizer) {
+      return;
+    }
+    let resizing = false;
+    const defaultWidth = 430;
+
+    function applyWidth(width) {
+      const maxWidth = Math.max(320, Math.min(window.innerWidth * 0.58, 820));
+      const nextWidth = Math.max(280, Math.min(maxWidth, width));
+      document.documentElement.style.setProperty("--nav-width", nextWidth + "px");
+    }
+
+    resizer.addEventListener("pointerdown", function (event) {
+      if (event.button !== 0 || window.matchMedia("(max-width: 1100px)").matches) {
+        return;
+      }
+      resizing = true;
+      document.body.classList.add("is-resizing-review-nav");
+      event.preventDefault();
+    });
+
+    resizer.addEventListener("dblclick", function (event) {
+      applyWidth(defaultWidth);
+      event.preventDefault();
+    });
+
+    document.addEventListener("pointermove", function (event) {
+      if (!resizing) {
+        return;
+      }
+      if (event.buttons !== 1) {
+        stopResize();
+        return;
+      }
+      applyWidth(event.clientX - 8);
+      event.preventDefault();
+    });
+
+    function stopResize(event) {
+      if (!resizing) {
+        return;
+      }
+      resizing = false;
+      document.body.classList.remove("is-resizing-review-nav");
+    }
+
+    document.addEventListener("pointerup", stopResize);
+    document.addEventListener("pointercancel", stopResize);
+    window.addEventListener("blur", stopResize);
+    document.addEventListener("visibilitychange", function () {
+      if (document.hidden) {
+        stopResize();
+      }
+    });
+  }
+
+  function initReviewNavTree() {
+    const nav = document.getElementById("review-comments");
+    if (!nav) {
+      return;
+    }
+    nav.addEventListener("click", function (event) {
+      const toggle = event.target.closest(".review-nav-toggle");
+      if (!toggle || !nav.contains(toggle)) {
+        return;
+      }
+      const node = toggle.closest(".review-nav-node");
+      if (!node) {
+        return;
+      }
+      const nextOpen = !node.classList.contains("is-open");
+      event.preventDefault();
+      event.stopPropagation();
+      node.classList.toggle("is-open", nextOpen);
+      toggle.setAttribute("aria-expanded", nextOpen ? "true" : "false");
+    });
+  }
+
+  function resetReviewNavTree() {
+    const nav = document.getElementById("review-comments");
+    if (!nav) {
+      return;
+    }
+    for (const node of nav.querySelectorAll(".review-nav-node")) {
+      const isFile = node.classList.contains("review-nav-file");
+      const shouldOpen = !isFile || node.classList.contains("review-nav-passthrough");
+      node.classList.toggle("is-open", shouldOpen);
+      const toggle = node.querySelector(":scope > .review-nav-row .review-nav-toggle");
+      if (toggle) {
+        toggle.setAttribute("aria-expanded", shouldOpen ? "true" : "false");
+      }
+    }
+    nav.scrollTop = 0;
+    nav.scrollLeft = 0;
+  }
+
+  function initReviewNavActiveFile() {
+    const nav = document.getElementById("review-comments");
+    const files = Array.from(document.querySelectorAll("article.file[data-file]"));
+    if (!nav || !files.length) {
+      return;
+    }
+    const navItemsByAnchor = new Map();
+    for (const link of nav.querySelectorAll('.review-nav-file > .review-nav-row a[href^="#"]')) {
+      const anchor = decodeURIComponent(String(link.getAttribute("href") || "").replace(/^#/, ""));
+      const item = link.closest(".review-nav-file");
+      if (anchor && item) {
+        navItemsByAnchor.set(anchor, item);
+      }
+    }
+    let activeItem = null;
+    let activeRaf = 0;
+
+    function revealActiveItem(item) {
+      let parent = item.parentElement ? item.parentElement.closest(".review-nav-dir") : null;
+      while (parent) {
+        parent.classList.add("is-open");
+        const toggle = parent.querySelector(":scope > .review-nav-row .review-nav-toggle");
+        if (toggle) {
+          toggle.setAttribute("aria-expanded", "true");
+        }
+        parent = parent.parentElement ? parent.parentElement.closest(".review-nav-dir") : null;
+      }
+      item.scrollIntoView({ block: "nearest", inline: "nearest" });
+    }
+
+    function setActiveFile(article) {
+      const nextItem = article ? navItemsByAnchor.get(article.id) || null : null;
+      if (nextItem === activeItem) {
+        return;
+      }
+      if (activeItem) {
+        activeItem.classList.remove("is-current");
+      }
+      activeItem = nextItem;
+      if (activeItem) {
+        activeItem.classList.add("is-current");
+        revealActiveItem(activeItem);
+      }
+    }
+
+    function updateActiveFile() {
+      activeRaf = 0;
+      const story = document.getElementById("story");
+      const probeY = Math.min(
+        Math.max((story ? story.offsetHeight : 0) + 80, 120),
+        window.innerHeight * 0.45
+      );
+      let candidate = null;
+      let fallback = null;
+      for (const file of files) {
+        const rect = file.getBoundingClientRect();
+        if (rect.bottom <= probeY || rect.top >= window.innerHeight) {
+          continue;
+        }
+        if (rect.top <= probeY) {
+          candidate = file;
+        } else if (!fallback) {
+          fallback = file;
+        }
+      }
+      setActiveFile(candidate || fallback);
+    }
+
+    function scheduleActiveFileUpdate() {
+      if (activeRaf) {
+        return;
+      }
+      activeRaf = window.requestAnimationFrame(updateActiveFile);
+    }
+
+    window.addEventListener("scroll", scheduleActiveFileUpdate, { passive: true });
+    window.addEventListener("resize", scheduleActiveFileUpdate);
+    scheduleActiveFileUpdate();
+  }
+
+  function updateStoryOffset() {
+    const story = document.getElementById("story");
+    const offset = story ? Math.ceil(story.getBoundingClientRect().height) : 0;
+    document.documentElement.style.setProperty("--story-offset", offset + "px");
+  }
+
+  function updateTopButtonState() {
+    if (topStateRaf) {
+      return;
+    }
+    topStateRaf = window.requestAnimationFrame(function () {
+      topStateRaf = 0;
+      document.body.classList.toggle("has-left-top", window.scrollY > 24);
+    });
+  }
+
+  function setActive(index) {
+    activeIndex = Math.max(0, Math.min(steps.length - 1, index));
+    steps.forEach(function (step, stepIndex) {
+      step.classList.toggle("is-active", stepIndex === activeIndex);
+    });
+    if (counter) {
+      counter.textContent = (activeIndex + 1) + " / " + steps.length;
+    }
+    const step = steps[activeIndex];
+    document.body.dataset.activeStoryTitle = step.dataset.storyTitle || "";
+    document.body.dataset.activeStoryBody = step.dataset.storyBody || "";
+    if (detailsTitle) {
+      detailsTitle.textContent = step.dataset.storyTitle || "Details";
+    }
+    if (detailsBody) {
+      detailsBody.textContent = step.dataset.storyBody || "";
+    }
+  }
+
+  function clearTargetHighlight() {
+    if (activeTarget) {
+      activeTarget.classList.remove("story-target-active");
+      activeTarget = null;
+    }
+    clearFlashTargets();
+  }
+
+  function openStep(index) {
+    setActive(index);
+    const step = steps[activeIndex];
+    clearTargetHighlight();
+
+    const targetId = step.dataset.storyTarget || "";
+    jumpToStoryTarget(step, targetId);
+  }
+
+  function jumpToStoryTarget(step, targetId) {
+    if (targetId) {
+      const target = document.getElementById(targetId);
+      if (target) {
+        activeTarget = target;
+        target.classList.add("story-target-active");
+        animateWindowScrollToElement(target, jumpDurationMs);
+      }
+    } else {
+      animateWindowScrollToElement(step, jumpDurationMs);
+    }
+  }
+
+  function jumpToHash(hash, updateUrl) {
+    const targetId = decodeURIComponent(String(hash || "").replace(/^#/, ""));
+    if (!targetId) {
+      return false;
+    }
+    const target = document.getElementById(targetId);
+    if (!target) {
+      return false;
+    }
+    clearTargetHighlight();
+    activeTarget = target;
+    target.classList.add("story-target-active");
+    animateWindowScrollToElement(target, jumpDurationMs);
+    if (updateUrl && history.replaceState) {
+      history.replaceState(null, "", location.pathname + location.search);
+    }
+    return true;
+  }
+
+  function jumpToTop() {
+    clearTargetHighlight();
+    navigationToken += 1;
+    animateWindowScrollToY(0, jumpDurationMs, navigationToken);
+    const nav = document.getElementById("review-comments");
+    if (nav) {
+      nav.scrollTop = 0;
+      nav.scrollLeft = 0;
+    }
+    if (history.replaceState) {
+      history.replaceState(null, "", location.pathname + location.search);
+    }
+    updateTopButtonState();
+  }
+
+  function resetPageScrollOnLoad() {
+    const nav = document.getElementById("review-comments");
+    window.scrollTo(0, 0);
+    if (nav) {
+      nav.scrollTop = 0;
+      nav.scrollLeft = 0;
+    }
+    document.body.classList.remove("has-left-top");
+  }
+
+  function animateWindowScrollToElement(element, durationMs) {
+    window.clearTimeout(activeScrollTimer);
+    window.clearTimeout(activeScrollEndTimer);
+    navigationToken += 1;
+    const token = navigationToken;
+    const startY = window.scrollY;
+    const scrollElement = scrollContextElement(element);
+    const rect = scrollElement.getBoundingClientRect();
+    const safeTop = scrollSafeTop();
+    const maxY = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+    const targetY = Math.max(0, Math.min(maxY, startY + rect.top - safeTop));
+    animateWindowScrollToY(targetY, durationMs, token, function () {
+      flashTargets(element, scrollElement);
+    });
+  }
+
+  function scrollSafeTop() {
+    const value = getComputedStyle(document.documentElement).getPropertyValue("--story-offset");
+    const storyOffset = Number.parseFloat(value || "0");
+    return (Number.isFinite(storyOffset) ? storyOffset : 0) + 72;
+  }
+
+  function scrollContextElement(element) {
+    if (!element || !element.classList || !element.classList.contains("review-comment")) {
+      return element;
+    }
+    const row = element.closest("tr.comment-row");
+    if (!row) {
+      return element;
+    }
+    let context = row;
+    let visibleLines = 0;
+    let cursor = row.previousElementSibling;
+    while (cursor && visibleLines < 3) {
+      if (cursor.matches("tr[id], tr.add, tr.ctx, tr.del")) {
+        context = cursor;
+        visibleLines += 1;
+      }
+      cursor = cursor.previousElementSibling;
+    }
+    return context;
+  }
+
+  function flashTargets(element, contextElement) {
+    clearFlashTargets();
+    const commentTargets = element && element.classList && element.classList.contains("review-comment")
+      ? [element]
+      : [];
+    const codeTargets = codeFlashTargets(element, contextElement);
+    for (const target of commentTargets) {
+      target.classList.remove("story-target-flash");
+      void target.offsetWidth;
+      target.classList.add("story-target-flash");
+      activeFlashClearTimer = window.setTimeout(function () {
+        target.classList.remove("story-target-flash");
+      }, 460);
+    }
+    for (const target of codeTargets) {
+      target.classList.remove("code-target-flash");
+      target.classList.remove("code-target-flash-start");
+      target.classList.remove("code-target-flash-end");
+      void target.offsetWidth;
+      target.classList.add("code-target-flash");
+      activeFlashClearTimer = window.setTimeout(function () {
+        target.classList.remove("code-target-flash");
+        target.classList.remove("code-target-flash-start");
+        target.classList.remove("code-target-flash-end");
+      }, 460);
+    }
+  }
+
+  function codeFlashTargets(element, contextElement) {
+    if (element && element.dataset && element.dataset.commentFile) {
+      const file = element.dataset.commentFile;
+      const start = Number(element.dataset.commentRangeStart || element.dataset.commentLine || 0);
+      const end = Number(element.dataset.commentRangeEnd || start);
+      if (file && Number.isFinite(start) && Number.isFinite(end)) {
+        const rows = Array.from(document.querySelectorAll("tr[data-file]")).filter(function (row) {
+          const line = Number(row.dataset.newLine || 0);
+          return row.dataset.file === file && line >= start && line <= end;
+        });
+        if (rows.length) {
+          rows[0].classList.add("code-target-flash-start");
+          rows[rows.length - 1].classList.add("code-target-flash-end");
+        }
+        return rows;
+      }
+    }
+    const row = contextElement && contextElement.closest ? contextElement.closest("tr[data-file]") : null;
+    if (row) {
+      row.classList.add("code-target-flash-start");
+      row.classList.add("code-target-flash-end");
+      return [row];
+    }
+    return [];
+  }
+
+  function clearFlashTargets() {
+    window.clearTimeout(activeFlashClearTimer);
+    for (const target of document.querySelectorAll(".story-target-flash")) {
+      target.classList.remove("story-target-flash");
+    }
+    for (const target of document.querySelectorAll(".code-target-flash")) {
+      target.classList.remove("code-target-flash");
+      target.classList.remove("code-target-flash-start");
+      target.classList.remove("code-target-flash-end");
+    }
+  }
+
+  function animateWindowScrollToY(targetY, durationMs, token, onDone) {
+    window.clearTimeout(activeScrollTimer);
+    window.clearTimeout(activeScrollEndTimer);
+    const startY = window.scrollY;
+    const maxY = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+    targetY = Math.max(0, Math.min(maxY, targetY));
+    const distance = targetY - startY;
+    const startedAt = performance.now();
+    if (durationMs <= 0) {
+      window.scrollTo(0, targetY);
+      updateTopButtonState();
+      if (onDone) {
+        onDone();
+      }
+      return;
+    }
+    if (!distance) {
+      if (onDone) {
+        onDone();
+      }
+      return;
+    }
+    function tick(now) {
+      if (token && token !== navigationToken) {
+        return;
+      }
+      const elapsed = Math.min(1, (now - startedAt) / durationMs);
+      const eased = elapsed < 0.5
+        ? 4 * elapsed * elapsed * elapsed
+        : 1 - Math.pow(-2 * elapsed + 2, 3) / 2;
+      window.scrollTo(0, startY + distance * eased);
+      if (elapsed < 1) {
+        activeScrollTimer = window.setTimeout(function () {
+          tick(performance.now());
+        }, 16);
+      }
+    }
+    tick(performance.now());
+    activeScrollEndTimer = window.setTimeout(function () {
+      if (token && token !== navigationToken) {
+        return;
+      }
+      window.scrollTo(0, targetY);
+      updateTopButtonState();
+      if (onDone) {
+        onDone();
+      }
+    }, durationMs + 30);
+  }
+
+  document.addEventListener("click", function (event) {
+    const nav = event.target.closest("[data-story-nav]");
+    if (nav) {
+      openStep(activeIndex + (nav.dataset.storyNav === "prev" ? -1 : 1));
+      return;
+    }
+    if (event.target.closest("[data-story-top]")) {
+      event.preventDefault();
+      jumpToTop();
+      return;
+    }
+    if (event.target.closest("[data-review-nav-reset]")) {
+      event.preventDefault();
+      resetReviewNavTree();
+      return;
+    }
+    const navFileLink = event.target.closest(".review-nav-file .review-nav-row a");
+    if (navFileLink && jumpToHash(navFileLink.getAttribute("href"), true)) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    const anchor = event.target.closest('a[href^="#"]');
+    if (anchor && jumpToHash(anchor.getAttribute("href"), true)) {
+      event.preventDefault();
+      return;
+    }
+    const step = event.target.closest("[data-story-index]");
+    if (step) {
+      const index = Number(step.dataset.storyIndex);
+      if (Number.isFinite(index)) {
+        event.stopPropagation();
+        openStep(index);
+      }
+    }
+  });
+
+  document.addEventListener("keydown", function (event) {
+    if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) {
+      return;
+    }
+    if (event.key === "ArrowRight") {
+      event.preventDefault();
+      openStep(activeIndex + 1);
+    } else if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      openStep(activeIndex - 1);
+    }
+  });
+
+  initReviewNavResize();
+  initReviewNavTree();
+  initReviewNavActiveFile();
+  updateStoryOffset();
+  updateTopButtonState();
+  resetPageScrollOnLoad();
+  setActive(0);
+  if (location.hash && history.replaceState) {
+    history.replaceState(null, "", location.pathname + location.search);
+  }
+  window.addEventListener("scroll", updateTopButtonState, { passive: true });
+  window.addEventListener("resize", updateStoryOffset);
+  window.addEventListener("pageshow", function () {
+    updateStoryOffset();
+    updateTopButtonState();
+    resetPageScrollOnLoad();
+  });
+  window.setTimeout(function () {
+    updateStoryOffset();
+    updateTopButtonState();
+    resetPageScrollOnLoad();
+  }, 60);
+}());
+</script>
 """
 
 
@@ -1243,8 +2197,12 @@ def _diagram_script() -> str:
   const searchInput = document.getElementById("diagram-search");
   const searchCount = document.getElementById("diagram-search-count");
   const generalViewButton = document.getElementById("diagram-general-view");
+  const storyContext = document.getElementById("diagram-story-context");
+  const storyTitle = document.getElementById("diagram-story-title");
+  const storyBody = document.getElementById("diagram-story-body");
   const zoomTools = Array.from(document.querySelectorAll("[data-diagram-zoom-tool]"));
   let scale = 1;
+  let initialScale = 1;
   let mode = "";
   let activeFocusTerms = [];
   let activeNotes = [];
@@ -1270,6 +2228,47 @@ def _diagram_script() -> str:
       stage.style.marginRight = ((scale - 1) * stage.scrollWidth) + "px";
       stage.style.marginBottom = ((scale - 1) * stage.scrollHeight) + "px";
     }
+  }
+
+  function setInitialDiagramScale() {
+    initialScale = 1;
+    if (mode !== "diagram") {
+      setScale(initialScale);
+      return;
+    }
+    const svg = content.querySelector(".diagram-zoom-stage svg");
+    const size = svgNaturalSize(svg);
+    if (!size || !size.width || !size.height) {
+      setScale(initialScale);
+      return;
+    }
+    const availableWidth = Math.max(0, content.clientWidth - 36);
+    const availableHeight = Math.max(0, content.clientHeight - 36);
+    if (size.width > availableWidth || size.height > availableHeight) {
+      setScale(initialScale);
+      return;
+    }
+    initialScale = Math.min(3, availableWidth / size.width, availableHeight / size.height);
+    setScale(initialScale);
+  }
+
+  function svgNaturalSize(svg) {
+    if (!svg) {
+      return null;
+    }
+    if (svg.viewBox && svg.viewBox.baseVal && svg.viewBox.baseVal.width && svg.viewBox.baseVal.height) {
+      return {
+        width: svg.viewBox.baseVal.width,
+        height: svg.viewBox.baseVal.height,
+      };
+    }
+    let box;
+    try {
+      box = svg.getBBox();
+    } catch (error) {
+      return null;
+    }
+    return box ? { width: box.width, height: box.height } : null;
   }
 
   function setMode(nextMode) {
@@ -1301,9 +2300,6 @@ def _diagram_script() -> str:
     for (const node of content.querySelectorAll(".diagram-note-layer")) {
       node.remove();
     }
-    for (const node of content.querySelectorAll(".asset-focus-box")) {
-      node.remove();
-    }
     for (const node of content.querySelectorAll(".asset-focus-connector")) {
       node.classList.remove("asset-focus-connector", "asset-focus-connector-reverse");
     }
@@ -1318,9 +2314,6 @@ def _diagram_script() -> str:
     }
     activeCodeLinkHoverInstance = "";
     activeCodeLinkHoverTarget = "";
-    for (const node of content.querySelectorAll(".diagram-code-link-hit-area")) {
-      node.remove();
-    }
     if (mode === "log") {
       renderLogView(searchInput ? searchInput.value : "", activeFocusTerms);
     }
@@ -1351,34 +2344,47 @@ def _diagram_script() -> str:
     });
   }
 
-  function addSvgFocusBox(node) {
-    const svg = node.ownerSVGElement;
-    if (!svg || typeof node.getBBox !== "function") {
-      return;
+  function markSvgFocusMatch(node) {
+    const labelNode = svgTextLabelNode(node);
+    labelNode.classList.add("asset-focus-match");
+    if (labelNode.querySelectorAll) {
+      for (const child of labelNode.querySelectorAll("tspan")) {
+        child.classList.add("asset-focus-match");
+      }
     }
-    let box;
-    try {
-      box = node.getBBox();
-    } catch (error) {
-      return;
+  }
+
+  function svgLabelLineGroup(node) {
+    const labelNode = svgTextLabelNode(node);
+    const box = safeBBox(labelNode);
+    const parent = labelNode.parentNode;
+    if (!box || !parent || !labelNode.tagName || labelNode.tagName.toLowerCase() !== "text") {
+      return [labelNode];
     }
-    const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
-    const paddingX = 6;
-    const paddingY = 4;
-    rect.setAttribute("class", "asset-focus-box");
-    rect.setAttribute("x", String(box.x - paddingX));
-    rect.setAttribute("y", String(box.y - paddingY));
-    rect.setAttribute("width", String(box.width + paddingX * 2));
-    rect.setAttribute("height", String(box.height + paddingY * 2));
-    const parent = node.parentNode || svg;
-    parent.insertBefore(rect, node);
+    const group = [];
+    const x = Number.parseFloat(labelNode.getAttribute("x") || "");
+    const centerY = box.y + box.height / 2;
+    for (const candidate of parent.querySelectorAll("text")) {
+      const candidateBox = safeBBox(candidate);
+      if (!candidateBox) {
+        continue;
+      }
+      const candidateX = Number.parseFloat(candidate.getAttribute("x") || "");
+      const candidateCenterY = candidateBox.y + candidateBox.height / 2;
+      if (
+        Number.isFinite(x)
+        && Number.isFinite(candidateX)
+        && Math.abs(candidateX - x) <= 2
+        && Math.abs(candidateCenterY - centerY) <= 22
+      ) {
+        group.push(candidate);
+      }
+    }
+    return group.length ? group : [labelNode];
   }
 
   function isSvgConnector(node) {
     if (!node || !node.tagName) {
-      return false;
-    }
-    if (node.classList && node.classList.contains("diagram-code-link-hit-area")) {
       return false;
     }
     const tag = node.tagName.toLowerCase();
@@ -1601,27 +2607,133 @@ def _diagram_script() -> str:
     if (mode === "diagram") {
       const focused = [];
       const textNodes = content.querySelectorAll("svg text, svg tspan");
+      const focusedLabels = new Set();
       for (const node of textNodes) {
         if (matchesAnyTerm(node.textContent, activeFocusTerms)) {
-          node.classList.add("asset-focus-match");
-          if (!isDiagramNoteTarget(node, notes || [])) {
-            addSvgFocusBox(node);
+          const labelNode = svgTextLabelNode(node);
+          if (focusedLabels.has(labelNode)) {
+            continue;
           }
-          addSvgFocusConnector(node);
-          focused.push(node);
+          const labelLines = svgLabelLineGroup(labelNode);
+          for (const labelLine of labelLines) {
+            focusedLabels.add(labelLine);
+            markSvgFocusMatch(labelLine);
+          }
+          addSvgFocusConnector(labelNode);
+          focused.push(labelNode);
         }
       }
       addDiagramNotes(notes || [], textNodes);
       if (focused[0]) {
-        focused[0].scrollIntoView({ block: "center", inline: "center" });
+        window.setTimeout(function () {
+          animateScrollContainerToElement(content, focused[0], 1000);
+        }, 40);
       }
     } else if (mode === "log") {
       renderLogView(searchInput ? searchInput.value : "", activeFocusTerms);
       const firstLine = content.querySelector(".asset-focus-line");
       if (firstLine) {
-        firstLine.scrollIntoView({ block: "center", inline: "nearest" });
+        window.setTimeout(function () {
+          animateScrollContainerToElement(content, firstLine, 1000);
+        }, 40);
       }
     }
+  }
+
+  function animateScrollContainerToElement(container, element, durationMs) {
+    const startLeft = container.scrollLeft;
+    const startTop = container.scrollTop;
+    const containerRect = container.getBoundingClientRect();
+    const targetRect = elementViewportRect(element);
+    const maxLeft = Math.max(0, container.scrollWidth - container.clientWidth);
+    const maxTop = Math.max(0, container.scrollHeight - container.clientHeight);
+    const targetLeft = clamp(
+      startLeft + targetRect.left - containerRect.left - container.clientWidth / 2 + targetRect.width / 2,
+      0,
+      maxLeft
+    );
+    const targetTop = clamp(
+      startTop + targetRect.top - containerRect.top - container.clientHeight / 2 + targetRect.height / 2,
+      0,
+      maxTop
+    );
+    const deltaLeft = targetLeft - startLeft;
+    const deltaTop = targetTop - startTop;
+    const startedAt = performance.now();
+    if (!deltaLeft && !deltaTop) {
+      return;
+    }
+    function tick(now) {
+      const elapsed = Math.min(1, (now - startedAt) / durationMs);
+      const eased = elapsed < 0.5
+        ? 4 * elapsed * elapsed * elapsed
+        : 1 - Math.pow(-2 * elapsed + 2, 3) / 2;
+      container.scrollLeft = startLeft + deltaLeft * eased;
+      container.scrollTop = startTop + deltaTop * eased;
+      if (elapsed < 1) {
+        window.setTimeout(function () {
+          tick(performance.now());
+        }, 16);
+      }
+    }
+    tick(performance.now());
+    window.setTimeout(function () {
+      container.scrollLeft = targetLeft;
+      container.scrollTop = targetTop;
+    }, durationMs + 30);
+  }
+
+  function elementViewportRect(element) {
+    if (element.ownerSVGElement && typeof element.getBBox === "function") {
+      const svgRect = svgElementViewportRect(element);
+      if (svgRect) {
+        return svgRect;
+      }
+    }
+    return element.getBoundingClientRect();
+  }
+
+  function svgElementViewportRect(element) {
+    let box;
+    let matrix;
+    try {
+      box = element.getBBox();
+      matrix = element.getScreenCTM();
+    } catch (error) {
+      return null;
+    }
+    if (!box || !matrix) {
+      return null;
+    }
+    const points = [
+      svgPoint(element, box.x, box.y).matrixTransform(matrix),
+      svgPoint(element, box.x + box.width, box.y).matrixTransform(matrix),
+      svgPoint(element, box.x, box.y + box.height).matrixTransform(matrix),
+      svgPoint(element, box.x + box.width, box.y + box.height).matrixTransform(matrix),
+    ];
+    const xs = points.map(function (point) { return point.x; });
+    const ys = points.map(function (point) { return point.y; });
+    const left = Math.min.apply(Math, xs);
+    const top = Math.min.apply(Math, ys);
+    const right = Math.max.apply(Math, xs);
+    const bottom = Math.max.apply(Math, ys);
+    return {
+      left,
+      top,
+      width: right - left,
+      height: bottom - top,
+    };
+  }
+
+  function svgPoint(element, x, y) {
+    const svg = element.ownerSVGElement;
+    if (svg && typeof svg.createSVGPoint === "function") {
+      const point = svg.createSVGPoint();
+      point.x = x;
+      point.y = y;
+      return point;
+    }
+    return new DOMPoint(x, y);
   }
 
   function applyCodeLinks(links) {
@@ -1629,7 +2741,7 @@ def _diagram_script() -> str:
     closeCodePopover();
     activeCodeLinkHoverInstance = "";
     activeCodeLinkHoverTarget = "";
-    for (const node of content.querySelectorAll(".diagram-code-link-hit-area")) {
+    for (const node of content.querySelectorAll(".diagram-code-link-badge")) {
       node.remove();
     }
     for (const node of content.querySelectorAll(".diagram-code-link-target, .diagram-code-link-connector, .diagram-code-link-hover, .diagram-code-link-active")) {
@@ -1647,44 +2759,40 @@ def _diagram_script() -> str:
       if (!target) {
         continue;
       }
+      const linkedLabels = new Set();
       for (const node of textNodes) {
         if (!node.textContent.toLowerCase().includes(target)) {
           continue;
         }
-        decorateCodeLinkTarget(node, link, "code-link-" + String(instanceIndex));
+        const labelNode = svgTextLabelNode(node);
+        if (linkedLabels.has(labelNode)) {
+          continue;
+        }
+        linkedLabels.add(labelNode);
+        decorateCodeLinkTarget(labelNode, link, "code-link-" + String(instanceIndex));
         instanceIndex += 1;
       }
     }
   }
 
   function decorateCodeLinkTarget(node, link, instanceKey) {
-    node = codeLinkLabelNode(node);
+    node = svgTextLabelNode(node);
     const targetKey = String(link.target || "");
     const connectors = connectorsForText(node);
     node.classList.add("diagram-code-link-target");
     node.dataset.codeLinkTarget = targetKey;
     node.dataset.codeLinkInstance = instanceKey;
-    node.addEventListener("click", function (event) {
-      event.preventDefault();
-      event.stopPropagation();
-      activateCodeLink(targetKey, instanceKey);
-    });
     attachCodeLinkHover(node, targetKey, instanceKey);
     for (const connector of connectors) {
       connector.classList.add("diagram-code-link-connector");
       connector.dataset.codeLinkTarget = targetKey;
       connector.dataset.codeLinkInstance = instanceKey;
-      connector.addEventListener("click", function (event) {
-        event.preventDefault();
-        event.stopPropagation();
-        activateCodeLink(targetKey, instanceKey);
-      });
       attachCodeLinkHover(connector, targetKey, instanceKey);
     }
-    addCodeLinkHitArea(node, connectors, targetKey, instanceKey);
+    addCodeLinkBadge(node, targetKey, instanceKey);
   }
 
-  function codeLinkLabelNode(node) {
+  function svgTextLabelNode(node) {
     if (node && node.tagName && node.tagName.toLowerCase() === "tspan" && node.parentElement) {
       return node.parentElement;
     }
@@ -1699,7 +2807,10 @@ def _diagram_script() -> str:
   function setCodeLinkHover(targetKey, instanceKey, enabled) {
     for (const node of content.querySelectorAll("[data-code-link-instance]")) {
       if (node.dataset.codeLinkInstance === instanceKey) {
-        node.classList.toggle("diagram-code-link-hover", enabled);
+        node.classList.toggle(
+          "diagram-code-link-hover",
+          enabled && node.classList.contains("diagram-code-link-badge")
+        );
       }
     }
     setDiagramNoteHoverForTarget(targetKey, enabled);
@@ -1711,7 +2822,7 @@ def _diagram_script() -> str:
       return;
     }
     const pointerTarget = document.elementFromPoint(event.clientX, event.clientY);
-    const item = pointerTarget ? pointerTarget.closest("[data-code-link-instance]") : null;
+    const item = pointerTarget ? pointerTarget.closest(".diagram-code-link-badge") : null;
     if (!item || !content.contains(item)) {
       clearCodeLinkHover();
       return;
@@ -1749,67 +2860,79 @@ def _diagram_script() -> str:
     }
   }
 
-  function addCodeLinkHitArea(labelNode, connectors, targetKey, instanceKey) {
+  function addCodeLinkBadge(labelNode, targetKey, instanceKey) {
     const svg = labelNode.ownerSVGElement;
-    const box = combinedSvgBox([labelNode].concat(connectors));
+    const box = safeBBox(labelNode);
     if (!svg || !box) {
       return;
     }
-    const paddingX = 2;
-    const paddingY = 3;
-    const hitArea = document.createElementNS("http://www.w3.org/2000/svg", "rect");
-    hitArea.setAttribute("class", "diagram-code-link-hit-area");
-    hitArea.setAttribute("x", String(box.x - paddingX));
-    hitArea.setAttribute("y", String(box.y - paddingY));
-    hitArea.setAttribute("width", String(box.width + paddingX * 2));
-    hitArea.setAttribute("height", String(box.height + paddingY * 2));
-    hitArea.setAttribute("rx", "3");
-    hitArea.setAttribute("ry", "3");
-    hitArea.dataset.codeLinkTarget = targetKey;
-    hitArea.dataset.codeLinkInstance = instanceKey;
-    hitArea.addEventListener("click", function (event) {
+    const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
+    group.setAttribute("class", "diagram-code-link-badge");
+    group.dataset.codeLinkTarget = targetKey;
+    group.dataset.codeLinkInstance = instanceKey;
+    const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
+    title.textContent = "Open linked diff code";
+    group.appendChild(title);
+    const badge = codeLinkBadgePlacement(svg, box);
+    const x = badge.x;
+    const y = badge.y;
+    const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+    rect.setAttribute("x", String(x));
+    rect.setAttribute("y", String(y));
+    rect.setAttribute("width", "28");
+    rect.setAttribute("height", "18");
+    group.appendChild(rect);
+    const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    text.setAttribute("x", String(x + 14));
+    text.setAttribute("y", String(y + 9));
+    text.textContent = "<>";
+    group.appendChild(text);
+    group.addEventListener("click", function (event) {
       event.preventDefault();
       event.stopPropagation();
       activateCodeLink(targetKey, instanceKey);
     });
-    attachCodeLinkHover(hitArea, targetKey, instanceKey);
+    attachCodeLinkHover(group, targetKey, instanceKey);
     const parent = labelNode.parentNode || svg;
-    parent.insertBefore(hitArea, firstSvgSibling([labelNode].concat(connectors), parent));
+    parent.appendChild(group);
   }
 
-  function firstSvgSibling(nodes, parent) {
-    const siblings = nodes.filter(function (node) {
-      return node && node.parentNode === parent;
-    });
-    if (!siblings.length) {
-      return parent.firstChild;
-    }
-    return siblings.reduce(function (first, node) {
-      if (!first) {
-        return node;
+  function codeLinkBadgePlacement(svg, labelBox) {
+    const width = 28;
+    const height = 18;
+    const gap = 8;
+    const candidates = [
+      { x: labelBox.x + labelBox.width + gap, y: labelBox.y + labelBox.height / 2 - height / 2 },
+      { x: labelBox.x - width - gap, y: labelBox.y + labelBox.height / 2 - height / 2 },
+      { x: labelBox.x + labelBox.width + gap, y: labelBox.y + labelBox.height + gap },
+      { x: labelBox.x + labelBox.width + gap, y: labelBox.y - height - gap },
+    ];
+    const occupied = nearbyDiagramNoteBoxes(svg);
+    for (const candidate of candidates) {
+      const candidateBox = { x: candidate.x - 3, y: candidate.y - 3, width: width + 6, height: height + 6 };
+      if (!occupied.some(function (box) { return svgBoxesOverlap(candidateBox, box); })) {
+        return candidate;
       }
-      return first.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_PRECEDING ? node : first;
-    }, null);
+    }
+    return candidates[1];
   }
 
-  function combinedSvgBox(nodes) {
-    let result = null;
-    for (const node of nodes) {
+  function nearbyDiagramNoteBoxes(svg) {
+    const boxes = [];
+    for (const node of svg.querySelectorAll(".diagram-note-hotspot")) {
       const box = safeBBox(node);
-      if (!box) {
-        continue;
+      if (box) {
+        boxes.push({ x: box.x - 4, y: box.y - 4, width: box.width + 8, height: box.height + 8 });
       }
-      if (!result) {
-        result = { x: box.x, y: box.y, width: box.width, height: box.height };
-        continue;
-      }
-      const minX = Math.min(result.x, box.x);
-      const minY = Math.min(result.y, box.y);
-      const maxX = Math.max(result.x + result.width, box.x + box.width);
-      const maxY = Math.max(result.y + result.height, box.y + box.height);
-      result = { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
     }
-    return result;
+    return boxes;
+  }
+
+  function svgBoxesOverlap(a, b) {
+    return a.x < b.x + b.width
+      && a.x + a.width > b.x
+      && a.y < b.y + b.height
+      && a.y + a.height > b.y;
   }
 
   function activateCodeLink(targetKey, instanceKey) {
@@ -1902,20 +3025,20 @@ def _diagram_script() -> str:
     if (!firstTarget) {
       return;
     }
-    const codeBox = firstTarget.closest(".diagram-code-link-code");
-    if (!codeBox) {
+    const scroller = popover.querySelector(".diagram-code-popover-body");
+    if (!scroller) {
       return;
     }
-    const codeBoxRect = codeBox.getBoundingClientRect();
+    const scrollerRect = scroller.getBoundingClientRect();
     const targetRect = firstTarget.getBoundingClientRect();
     const targetMiddle = (
-      codeBox.scrollTop
+      scroller.scrollTop
       + targetRect.top
-      - codeBoxRect.top
+      - scrollerRect.top
       + targetRect.height / 2
     );
-    const maxScroll = Math.max(0, codeBox.scrollHeight - codeBox.clientHeight);
-    codeBox.scrollTop = Math.min(maxScroll, Math.max(0, targetMiddle - codeBox.clientHeight / 2));
+    const maxScroll = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+    scroller.scrollTop = Math.min(maxScroll, Math.max(0, targetMiddle - scroller.clientHeight / 2));
   }
 
   function closeExistingCodePopoverOnly() {
@@ -2073,9 +3196,15 @@ def _diagram_script() -> str:
 
   function findNoteTarget(textNodes, targetText) {
     const lowerTarget = String(targetText).toLowerCase();
+    const seenLabels = new Set();
     for (const node of textNodes) {
-      if (node.textContent.toLowerCase().includes(lowerTarget)) {
-        return node;
+      const labelNode = svgTextLabelNode(node);
+      if (seenLabels.has(labelNode)) {
+        continue;
+      }
+      seenLabels.add(labelNode);
+      if (labelNode.textContent.toLowerCase().includes(lowerTarget)) {
+        return labelNode;
       }
     }
     return null;
@@ -2162,14 +3291,6 @@ def _diagram_script() -> str:
     const parent = target.parentNode;
     if (!parent) {
       return;
-    }
-    for (const candidate of Array.from(parent.querySelectorAll(".asset-focus-box"))) {
-      const box = safeBBox(candidate);
-      const targetBox = safeBBox(target);
-      if (box && targetBox && boxesOverlap(box, targetBox)) {
-        parent.appendChild(candidate);
-        break;
-      }
     }
     for (const connector of connectors) {
       if (connector.parentNode === parent) {
@@ -2275,12 +3396,13 @@ def _diagram_script() -> str:
     showSearchMatch();
   }
 
-  function openTemplate(prefix, id, nextMode, focusTerms, notes) {
+  function openTemplate(prefix, id, nextMode, focusTerms, notes, nextStoryContext) {
     const template = document.getElementById(prefix + "-template-" + id);
     if (!template) {
       return;
     }
     title.textContent = template.dataset.title || "Diagram";
+    setStoryContext(nextStoryContext || null);
     content.innerHTML = "";
     const stage = document.createElement("div");
     stage.className = "diagram-zoom-stage";
@@ -2292,7 +3414,7 @@ def _diagram_script() -> str:
     if (searchInput) {
       searchInput.value = "";
     }
-    setScale(1);
+    setInitialDiagramScale();
     applyFocusTerms(focusTerms || [], notes || []);
     applyCodeLinks(nextMode === "diagram" ? parseCodeLinks(template.dataset.codeLinks) : []);
     if (nextMode === "log" && searchInput) {
@@ -2300,12 +3422,32 @@ def _diagram_script() -> str:
     }
   }
 
-  function openDiagram(id, focusTerms, notes) {
-    openTemplate("diagram", id, "diagram", focusTerms, notes);
+  function setStoryContext(nextStoryContext) {
+    const contextTitle = nextStoryContext ? String(nextStoryContext.title || "") : "";
+    const contextBody = nextStoryContext ? String(nextStoryContext.body || "") : "";
+    if (!storyContext || !storyTitle || !storyBody) {
+      return;
+    }
+    storyTitle.textContent = contextTitle;
+    storyBody.textContent = contextBody;
+    storyContext.hidden = !(contextTitle || contextBody);
   }
 
-  function openLog(id, focusTerms) {
-    openTemplate("log", id, "log", focusTerms);
+  function storyContextFromTrigger(trigger) {
+    const triggerTitle = trigger ? trigger.dataset.storyTitle || "" : "";
+    const triggerBody = trigger ? trigger.dataset.storyBody || "" : "";
+    return {
+      title: triggerTitle || document.body.dataset.activeStoryTitle || "",
+      body: triggerBody || document.body.dataset.activeStoryBody || "",
+    };
+  }
+
+  function openDiagram(id, focusTerms, notes, nextStoryContext) {
+    openTemplate("diagram", id, "diagram", focusTerms, notes, nextStoryContext);
+  }
+
+  function openLog(id, focusTerms, nextStoryContext) {
+    openTemplate("log", id, "log", focusTerms, undefined, nextStoryContext);
   }
 
   function closeDiagram() {
@@ -2313,10 +3455,12 @@ def _diagram_script() -> str:
     content.innerHTML = "";
     document.body.style.overflow = "";
     scale = 1;
+    initialScale = 1;
     setMode("");
     activeFocusTerms = [];
     activeNotes = [];
     activeCodeLinks = [];
+    setStoryContext(null);
     closeCodePopover();
     clearSearch();
   }
@@ -2324,12 +3468,21 @@ def _diagram_script() -> str:
   document.addEventListener("click", function (event) {
     const preview = event.target.closest("[data-diagram-id]");
     if (preview) {
-      openDiagram(preview.dataset.diagramId, parseFocus(preview.dataset.diagramFocus), parseNotes(preview.dataset.diagramNotes));
+      openDiagram(
+        preview.dataset.diagramId,
+        parseFocus(preview.dataset.diagramFocus),
+        parseNotes(preview.dataset.diagramNotes),
+        storyContextFromTrigger(preview)
+      );
       return;
     }
     const logPreview = event.target.closest("[data-log-id]");
     if (logPreview) {
-      openLog(logPreview.dataset.logId, parseFocus(logPreview.dataset.logFocus));
+      openLog(
+        logPreview.dataset.logId,
+        parseFocus(logPreview.dataset.logFocus),
+        storyContextFromTrigger(logPreview)
+      );
       return;
     }
     if (event.target.closest("[data-diagram-close]")) {
@@ -2344,7 +3497,7 @@ def _diagram_script() -> str:
       } else if (action === "out") {
         setScale(scale - 0.25);
       } else {
-        setScale(1);
+        setScale(initialScale);
       }
       return;
     }
@@ -2427,7 +3580,7 @@ def _diagram_script() -> str:
     if (event.target.closest("button, input")) {
       return;
     }
-    if (event.target.closest(".diagram-code-link-target, .diagram-code-link-connector, .diagram-code-link-hit-area, .diagram-note-hotspot, .diagram-code-overlay")) {
+    if (event.target.closest(".diagram-code-link-badge, .diagram-note-hotspot, .diagram-code-overlay")) {
       return;
     }
     clearCodeLinkHover();

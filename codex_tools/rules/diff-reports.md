@@ -122,3 +122,12 @@ directories.
     strings matched against full log lines. Focus highlighting must apply only
     when the log is opened from that link, not when the same reusable log is
     opened from another comment or from the report-level logs section.
+13. Non-trivial reports should provide a top-level `story` array in the
+    canonical comments JSON. Treat `story` as the reader's guided route through
+    the report, not as another comment list. Each step should explain why the
+    next target matters and point at a concrete reading target: a file, a
+    rendered new-file diff line, or an inline comment.
+    The generated HTML must provide `Prev` and `Next` story controls, keep the
+    active step visible, and scroll to code/comment targets. Supporting
+    diagrams and logs should remain attached to the relevant comments rather
+    than being opened from the story controls.
