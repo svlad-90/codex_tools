@@ -67,14 +67,44 @@ directories.
     section.
     A specific comment link may also provide `diagram_notes`, a list of
     objects with `target` and `text`. The `target` should match visible SVG
-    text for the related arrow label; the generated modal must render the note
-    as an in-diagram callout to the right of that arrow, and hovering either
-    the arrow/label or the callout must highlight both together. Note callouts
-    must not make text bold on hover, must not trigger click or drag behavior
-    when clicked, and must keep the original sequence-diagram arrow visually
-    above any note or target overlay. When a note target is also listed in
-    `diagram_focus`, prefer highlighting the target text and arrow without a
-    rectangular focus box around the arrow label.
+    text for the related arrow label; the generated modal must render a small
+    visible note marker near that arrow and reveal the full in-diagram callout
+    only when hovering the marker or the arrow/label. Hovering either side must
+    highlight both together. Note callouts must not make text bold on hover,
+    must not trigger click or drag behavior when clicked, and must keep the
+    original sequence-diagram arrow visually above any note or target overlay.
+    When a note target is also listed in `diagram_focus`, prefer highlighting
+    the target text and arrow without a rectangular focus box around the arrow
+    label. Automatically placed notes must stay near their target arrow instead
+    of drifting across the whole diagram; use explicit `x` and `y` only when
+    automatic placement is not good enough.
+    A diagram may also provide `code_links`, a list of objects with `target`,
+    `file`, `line`, optional `title`, and optional `range`. The `target` should
+    match visible SVG text, usually a sequence arrow label. `line` must point
+    at the exact call or assignment that represents the arrow, while `range`
+    should provide the surrounding function or block context. The generated
+    modal must make that label and nearby arrow connector clickable. Clicking
+    either one opens a scrollable code popover centered over the diagram with a
+    translucent backdrop. The popover must show the available rendered diff
+    context for the referenced file, lightly highlight the context range,
+    strongly highlight the exact target line, and be closeable without leaving
+    or shifting the diagram. Clicking the backdrop outside the popover must
+    close it. Clickable arrow connectors should include an invisible
+    rectangular hit area around the visible arrow connector and label. Hovering
+    any part of a code link, including the hit area, must highlight the visible
+    arrow connector and label in blue so the reader can see which code block
+    will open. If the same arrow has a diagram note, hovering the hit area must
+    reveal that note too.
+    If the same label text appears more than once in one diagram, hover and
+    active highlighting must be scoped to the specific SVG occurrence being
+    hovered or clicked instead of highlighting every matching label.
+    When a code link is also included in the `diagram_focus` for the currently
+    opened comment, focused-comment styling must take precedence so all arrows
+    relevant to that comment read as one blue group.
+    Diagrams opened from
+    focused comment links must still provide a toolbar control to switch back
+    to the general diagram view while preserving diagram-level code-link
+    navigation.
 11. Reports may embed validation logs in the same way as diagrams. Declare
     reusable logs in the top-level `logs` object of the canonical comments JSON
     and reference them from file-level or inline comments with a `log` id. Use

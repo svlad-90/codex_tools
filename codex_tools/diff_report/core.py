@@ -18,6 +18,7 @@ class InlineComment:
     line: int
     body: str
     title: str = "Review comment"
+    line_range: tuple[int, int] | None = None
     diagram: str | None = None
     log: str | None = None
     diagram_focus: tuple[str, ...] = ()
@@ -30,6 +31,7 @@ class Diagram:
     diagram_id: str
     title: str
     svg: str
+    code_links: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -87,9 +89,9 @@ def compact_help() -> str:
             '  "summary": "optional markdown-free text",',
             '  "files": {"path/to/file.py": "file-level comment"},',
             '  "inline": [',
-            '    {"file": "path/to/file.py", "line": 42, "body": "comment", "title": "optional", "diagram": "optional-id", "diagram_focus": ["important SVG text"], "diagram_notes": [{"text": "note", "target": "SVG text"}], "log": "optional-log-id", "log_focus": ["important log line text"]}',
+            '    {"file": "path/to/file.py", "line": 42, "range": {"start": 42, "end": 45}, "body": "comment", "title": "optional", "diagram": "optional-id", "diagram_focus": ["important SVG text"], "diagram_notes": [{"text": "note", "target": "SVG text"}], "log": "optional-log-id", "log_focus": ["important log line text"]}',
             "  ],",
-            '  "diagrams": {"optional-id": {"title": "Diagram title", "svg": "report/puml/diagram.svg"}},',
+            '  "diagrams": {"optional-id": {"title": "Diagram title", "svg": "report/puml/diagram.svg", "code_links": [{"target": "SVG arrow label", "file": "path/to/file.py", "line": 42, "title": "Code target"}]}},',
             '  "logs": {"optional-log-id": {"title": "Runtime log", "path": "report/runtime/test.log"}}',
             "}",
         ]
@@ -203,9 +205,10 @@ def _render_comments_index(comments: ReviewComments) -> str:
     if inline_items:
         parts.append("    <h3>Inline comments</h3>\n    <ol class=\"comment-index\">\n")
         for comment in inline_items:
+            location = _comment_location(comment)
             parts.append(
                 f'      <li><a href="#{_comment_anchor(comment.file_path, comment.line)}">'
-                f'{_esc(comment.file_path)}:{comment.line}</a> '
+                f'{_esc(location)}</a> '
                 f'<strong>{_esc(comment.title)}</strong>: {_esc(comment.body)}</li>\n'
             )
         parts.append("    </ol>\n")
@@ -318,6 +321,7 @@ def _comments_from_payload(
             raise DiffReportError("comments.inline entries must be objects")
         file_path = str(_required(item, "file"))
         line = int(_required(item, "line"))
+        line_range = _comment_line_range(item.get("range"), line=line)
         body = str(_required(item, "body"))
         title = str(item.get("title", "Review comment"))
         diagram = str(item["diagram"]) if "diagram" in item else None
@@ -333,6 +337,7 @@ def _comments_from_payload(
             InlineComment(
                 file_path=file_path,
                 line=line,
+                line_range=line_range,
                 body=body,
                 title=title,
                 diagram=diagram,
@@ -388,8 +393,46 @@ def _diagrams_from_payload(
             svg = _read_svg_file(svg_path)
         else:
             raise DiffReportError(f"diagram entry is missing svg or svg_inline: {diagram_key}")
-        diagrams[diagram_key] = Diagram(diagram_id=diagram_key, title=title, svg=svg)
+        code_links = _diagram_code_links(raw, diagram_key)
+        diagrams[diagram_key] = Diagram(
+            diagram_id=diagram_key,
+            title=title,
+            svg=svg,
+            code_links=code_links,
+        )
     return diagrams
+
+
+def _diagram_code_links(raw: dict[str, Any], diagram_key: str) -> tuple[dict[str, Any], ...]:
+    raw_links = raw.get("code_links", ())
+    if raw_links in ((), [], None):
+        return ()
+    if not isinstance(raw_links, list):
+        raise DiffReportError(f"diagram code_links must be a list: {diagram_key}")
+
+    links: list[dict[str, Any]] = []
+    for index, raw_link in enumerate(raw_links):
+        if not isinstance(raw_link, dict):
+            raise DiffReportError(f"diagram code_links[{index}] must be an object: {diagram_key}")
+        target = str(raw_link.get("target", "")).strip()
+        file_path = str(raw_link.get("file", "")).strip()
+        line = raw_link.get("line")
+        if not target:
+            raise DiffReportError(f"diagram code_links[{index}] is missing target: {diagram_key}")
+        if not file_path:
+            raise DiffReportError(f"diagram code_links[{index}] is missing file: {diagram_key}")
+        if not isinstance(line, int):
+            raise DiffReportError(f"diagram code_links[{index}] line must be an integer: {diagram_key}")
+        link: dict[str, Any] = {
+            "target": target,
+            "file": file_path,
+            "line": line,
+            "title": str(raw_link.get("title", target)),
+        }
+        if "range" in raw_link:
+            link["range"] = raw_link["range"]
+        links.append(link)
+    return tuple(links)
 
 
 def _read_svg_file(svg_path: Path) -> str:
@@ -473,6 +516,9 @@ def _enrich_comments_payload(diff_text: str, payload: dict[str, Any]) -> dict[st
         file_path = str(_required(item, "file"))
         line = int(_required(item, "line"))
         enriched_item = dict(item)
+        line_range = _comment_line_range(enriched_item.get("range"), line=line)
+        if line_range is not None:
+            enriched_item["range"] = {"start": line_range[0], "end": line_range[1]}
         target = targets.get((file_path, line))
         if target is not None:
             enriched_item["target"] = _target_with_status(target, "found")
@@ -490,6 +536,12 @@ def _enrich_comments_payload(diff_text: str, payload: dict[str, Any]) -> dict[st
                     previous_line=line,
                 )
                 enriched_item["line"] = moved_target["line"]
+                if line_range is not None:
+                    line_delta = int(moved_target["line"]) - line
+                    enriched_item["range"] = {
+                        "start": line_range[0] + line_delta,
+                        "end": line_range[1] + line_delta,
+                    }
                 enriched_item["target"] = moved_target
                 enriched_inline.append(enriched_item)
                 continue
@@ -622,6 +674,26 @@ def _inline_item_line_ranges(comments_json: str) -> list[tuple[int, int]]:
     return ranges
 
 
+def _comment_line_range(value: Any, *, line: int) -> tuple[int, int] | None:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        start = int(_required(value, "start"))
+        end = int(_required(value, "end"))
+    elif isinstance(value, list) and len(value) == 2:
+        start = int(value[0])
+        end = int(value[1])
+    else:
+        raise DiffReportError(
+            "comments.inline[].range must be an object with start/end or a [start, end] array"
+        )
+    if start < 1 or end < start:
+        raise DiffReportError("comments.inline[].range must use positive inclusive line numbers")
+    if line < start or line > end:
+        raise DiffReportError("comments.inline[].line must be inside comments.inline[].range")
+    return (start, end)
+
+
 def _diff_line_targets(diff_text: str) -> dict[tuple[str, int], dict[str, Any]]:
     targets: dict[tuple[str, int], dict[str, Any]] = {}
     current_file: str | None = None
@@ -687,6 +759,8 @@ def _render_diff(diff_text: str, comments: ReviewComments) -> str:
     old_no: int | None = None
     new_no: int | None = None
     table_open = False
+    comment_ranges = _comment_line_ranges(comments)
+    inline_comments_by_render_line = _inline_comments_by_render_line(comments)
 
     def close_file() -> None:
         nonlocal table_open, current_file
@@ -739,16 +813,50 @@ def _render_diff(diff_text: str, comments: ReviewComments) -> str:
 
         if raw_line.startswith("+") and not raw_line.startswith("+++"):
             line_no = new_no
-            parts.append(_diff_row("add", "", str(new_no), raw_line, current_file, line_no))
-            parts.append(_render_inline_comments(comments, current_file, line_no))
+            parts.append(
+                _diff_row(
+                    "add",
+                    "",
+                    str(new_no),
+                    raw_line,
+                    current_file,
+                    line_no,
+                    _comment_target_classes(comment_ranges, current_file, line_no),
+                )
+            )
+            parts.append(
+                _render_inline_comments(
+                    inline_comments_by_render_line,
+                    comments,
+                    current_file,
+                    line_no,
+                )
+            )
             new_no += 1
         elif raw_line.startswith("-") and not raw_line.startswith("---"):
             parts.append(_diff_row("del", str(old_no), "", raw_line))
             old_no += 1
         else:
             line_no = new_no
-            parts.append(_diff_row("ctx", str(old_no), str(new_no), raw_line, current_file, line_no))
-            parts.append(_render_inline_comments(comments, current_file, line_no))
+            parts.append(
+                _diff_row(
+                    "ctx",
+                    str(old_no),
+                    str(new_no),
+                    raw_line,
+                    current_file,
+                    line_no,
+                    _comment_target_classes(comment_ranges, current_file, line_no),
+                )
+            )
+            parts.append(
+                _render_inline_comments(
+                    inline_comments_by_render_line,
+                    comments,
+                    current_file,
+                    line_no,
+                )
+            )
             old_no += 1
             new_no += 1
 
@@ -756,18 +864,70 @@ def _render_diff(diff_text: str, comments: ReviewComments) -> str:
     return "".join(parts)
 
 
-def _render_inline_comments(comments: ReviewComments, file_path: str, line: int) -> str:
+def _comment_line_ranges(comments: ReviewComments) -> dict[str, list[tuple[int, int]]]:
+    ranges: dict[str, list[tuple[int, int]]] = {}
+    for (file_path, line), inline_comments in comments.inline_comments.items():
+        for comment in inline_comments:
+            ranges.setdefault(file_path, []).append(comment.line_range or (line, line))
+    return ranges
+
+
+def _inline_comments_by_render_line(
+    comments: ReviewComments,
+) -> dict[tuple[str, int], list[InlineComment]]:
+    grouped: dict[tuple[str, int], list[InlineComment]] = {}
+    for (file_path, line), inline_comments in comments.inline_comments.items():
+        for comment in inline_comments:
+            render_line = comment.line_range[1] if comment.line_range is not None else line
+            grouped.setdefault((file_path, render_line), []).append(comment)
+    return grouped
+
+
+def _comment_target_classes(
+    ranges: dict[str, list[tuple[int, int]]],
+    file_path: str,
+    line: int,
+) -> tuple[str, ...]:
+    for start, end in ranges.get(file_path, ()):
+        if start <= line <= end:
+            classes = ["comment-target"]
+            if line == start:
+                classes.append("comment-target-start")
+            if line == end:
+                classes.append("comment-target-end")
+            if start == end:
+                classes.append("comment-target-single")
+            return tuple(classes)
+    return ()
+
+
+def _render_inline_comments(
+    grouped_comments: dict[tuple[str, int], list[InlineComment]],
+    comments: ReviewComments,
+    file_path: str,
+    line: int,
+) -> str:
     rendered: list[str] = []
-    for comment in comments.inline_comments.get((file_path, line), ()):
+    for comment in grouped_comments.get((file_path, line), ()):
+        location = _comment_location(comment)
         rendered.append(
             '      <tr class="comment-row"><td colspan="3">'
-            f'<div class="review-comment" id="{_comment_anchor(file_path, line)}">'
-            f'<div class="title">{_esc(comment.title)} on {_esc(file_path)}:{line}</div>'
+            f'<div class="review-comment" id="{_comment_anchor(file_path, comment.line)}">'
+            f'<div class="title">{_esc(comment.title)} on {_esc(location)}</div>'
             f'<div class="body">{_esc(comment.body)}'
             f'{_render_comment_assets(comments, comment.diagram, comment.log, comment.diagram_focus, comment.log_focus, comment.diagram_notes)}</div>'
             "</div></td></tr>\n"
         )
     return "".join(rendered)
+
+
+def _comment_location(comment: InlineComment) -> str:
+    if comment.line_range is None:
+        return f"{comment.file_path}:{comment.line}"
+    start, end = comment.line_range
+    if start == end:
+        return f"{comment.file_path}:{start}"
+    return f"{comment.file_path}:{start}-{end}"
 
 
 def _render_comment_assets(
@@ -857,6 +1017,7 @@ def _render_diagram_modal(comments: ReviewComments) -> str:
     parts.append('      <div class="diagram-tools">\n')
     parts.append('        <input id="diagram-search" type="search" placeholder="Search" aria-label="Search opened asset">\n')
     parts.append('        <span id="diagram-search-count" class="diagram-search-count"></span>\n')
+    parts.append('        <button type="button" id="diagram-general-view" data-diagram-general hidden>General view</button>\n')
     parts.append('        <button type="button" data-diagram-search="prev" aria-label="Previous search match">Prev</button>\n')
     parts.append('        <button type="button" data-diagram-search="next" aria-label="Next search match">Next</button>\n')
     parts.append('        <button type="button" data-diagram-zoom="out" data-diagram-zoom-tool aria-label="Zoom out">-</button>\n')
@@ -874,9 +1035,10 @@ def _render_diagram_modal(comments: ReviewComments) -> str:
     parts.append('<div class="diagram-store" hidden>\n')
     for diagram in comments.diagrams.values():
         safe_id = _anchor(diagram.diagram_id)
+        links_attr = _json_attr("data-code-links", diagram.code_links)
         parts.append(
             f'  <template id="diagram-template-{_esc(safe_id)}" '
-            f'data-title="{_esc(diagram.title)}">{diagram.svg}</template>\n'
+            f'data-title="{_esc(diagram.title)}"{links_attr}>{diagram.svg}</template>\n'
         )
     for log in comments.logs.values():
         safe_id = _anchor(log.log_id)
@@ -897,12 +1059,17 @@ def _diff_row(
     text: str,
     file_path: str | None = None,
     new_line: int | None = None,
+    extra_classes: tuple[str, ...] = (),
 ) -> str:
     attrs = ""
     if file_path is not None and new_line is not None:
-        attrs = f' data-file="{_esc(file_path)}" data-new-line="{new_line}"'
+        attrs = (
+            f' id="{_line_anchor(file_path, new_line)}"'
+            f' data-file="{_esc(file_path)}" data-new-line="{new_line}"'
+        )
+    class_name = " ".join((kind, *extra_classes))
     return (
-        f'      <tr class="{kind}"{attrs}><td class="num">{_esc(old_no)}</td>'
+        f'      <tr class="{class_name}"{attrs}><td class="num">{_esc(old_no)}</td>'
         f'<td class="num">{_esc(new_no)}</td><td class="code">{_esc(text)}</td></tr>\n'
     )
 
@@ -961,9 +1128,18 @@ def _html_header(title: str) -> str:
     tr.ctx .num, tr.ctx .code {{ background: #fff; }}
     tr.hunk .num, tr.hunk .code {{ background: var(--hunk-bg); color: #0969da; }}
     tr.header .num, tr.header .code {{ background: #f6f8fa; color: var(--muted); font-weight: 700; }}
-    tr.comment-row td {{ background: #fff; padding: 0 !important; }}
-    .review-comment {{ margin: 6px 12px 8px 124px; border: 1px solid var(--comment-border); background: var(--comment-bg); border-radius: 6px; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
-    .review-comment .title {{ padding: 8px 10px; font-weight: 700; border-bottom: 1px solid rgba(212,167,44,.45); }}
+    tr.comment-target .num, tr.comment-target .code {{ background: #fffdf0; }}
+    tr.comment-target.add .num, tr.comment-target.add .code {{ background: linear-gradient(to right, rgba(255,248,197,.46), rgba(255,248,197,.46)), var(--add-bg); }}
+    tr.comment-target .num:first-child {{ box-shadow: inset 4px 0 0 var(--comment-border); }}
+    tr.comment-target-start .num, tr.comment-target-start .code {{ box-shadow: inset 0 1px 0 rgba(212,167,44,.55); }}
+    tr.comment-target-end .num, tr.comment-target-end .code {{ box-shadow: inset 0 -1px 0 rgba(212,167,44,.35); }}
+    tr.comment-target-start .num:first-child {{ box-shadow: inset 4px 0 0 var(--comment-border), inset 0 1px 0 rgba(212,167,44,.55); }}
+    tr.comment-target-end .num:first-child {{ box-shadow: inset 4px 0 0 var(--comment-border), inset 0 -1px 0 rgba(212,167,44,.35); }}
+    tr.comment-target-single .num:first-child {{ box-shadow: inset 4px 0 0 var(--comment-border), inset 0 1px 0 rgba(212,167,44,.55), inset 0 -1px 0 rgba(212,167,44,.35); }}
+    tr.comment-row td {{ background: linear-gradient(to right, rgba(255,253,240,.78) 0 112px, transparent 112px); padding: 0 !important; }}
+    .review-comment {{ position: relative; margin: 6px 18px 14px 112px; border: 1px solid rgba(212,167,44,.55); border-left-width: 4px; background: var(--comment-bg); border-radius: 6px; box-shadow: 0 1px 2px rgba(31,35,40,.08); overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
+    .review-comment::before {{ content: ""; position: absolute; top: -7px; left: -4px; width: 4px; height: 7px; background: var(--comment-border); }}
+    .review-comment .title {{ padding: 8px 10px; font-weight: 700; border-bottom: 1px solid rgba(212,167,44,.35); background: rgba(255,255,255,.38); }}
     .review-comment .body {{ padding: 9px 10px; }}
     .diagram-list {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }}
     .diagram-preview-wrap {{ margin-top: 10px; }}
@@ -985,7 +1161,22 @@ def _html_header(title: str) -> str:
     .diagram-search-count {{ min-width: 54px; color: var(--muted); font-size: 12px; text-align: center; }}
     .diagram-tools button {{ min-width: 36px; height: 32px; border: 1px solid var(--border); border-radius: 6px; background: #fff; cursor: pointer; font: inherit; }}
     .diagram-tools button:hover {{ border-color: #0969da; color: #0969da; }}
-    .diagram-scroll {{ flex: 1; min-height: 0; overflow: auto; padding: 18px; background: #fff; }}
+    .diagram-scroll {{ position: relative; flex: 1; min-height: 0; overflow: auto; padding: 18px; background: #fff; }}
+    .diagram-code-overlay {{ position: absolute; z-index: 4; display: flex; align-items: center; justify-content: center; padding: 28px; background: rgba(31,35,40,.42); box-sizing: border-box; }}
+    .diagram-code-popover {{ width: min(820px, 100%); max-height: min(620px, 100%); border: 1px solid var(--border); border-radius: 8px; background: #fff; box-shadow: 0 12px 32px rgba(31,35,40,.24); overflow: hidden; }}
+    .diagram-code-overlay[hidden] {{ display: none; }}
+    .diagram-code-popover-header {{ display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-bottom: 1px solid var(--border); background: #f6f8fa; }}
+    .diagram-code-popover-title {{ font-weight: 700; }}
+    .diagram-code-popover-close {{ width: 30px; height: 30px; border: 1px solid var(--border); border-radius: 6px; background: #fff; cursor: pointer; font: inherit; }}
+    .diagram-code-popover-close:hover {{ border-color: #0969da; color: #0969da; }}
+    .diagram-code-popover-body {{ max-height: min(540px, calc(100vh - 260px)); padding: 10px 12px; overflow: auto; }}
+    .diagram-code-link-item {{ display: block; margin: 0 0 10px; padding: 9px; border: 1px solid var(--border); border-radius: 6px; background: #fff; color: inherit; }}
+    .diagram-code-link-title {{ display: block; font-weight: 700; margin-bottom: 4px; }}
+    .diagram-code-link-location {{ display: block; color: var(--muted); font: 12px/1.35 ui-monospace, SFMono-Regular, Consolas, monospace; margin-bottom: 6px; }}
+    .diagram-code-link-code {{ display: block; max-height: 390px; overflow: auto; padding: 8px; border-radius: 4px; background: var(--code-bg); font: 12px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre; }}
+    .diagram-code-line {{ display: block; min-width: max-content; padding: 0 4px; }}
+    .diagram-code-context-line {{ background: rgba(255,248,197,.36); }}
+    .diagram-code-target-line {{ background: rgba(255,223,93,.82); border-left: 3px solid #9a6700; padding-left: 1px; font-weight: 700; }}
     .diagram-scroll[data-mode="diagram"] .diagram-zoom-stage {{ cursor: grab; }}
     .diagram-scroll.is-panning, .diagram-scroll.is-panning .diagram-zoom-stage {{ cursor: grabbing; user-select: none; }}
     .diagram-zoom-stage {{ transform-origin: 0 0; width: max-content; min-width: 100%; }}
@@ -1000,13 +1191,29 @@ def _html_header(title: str) -> str:
     svg line.asset-focus-connector-reverse, svg path.asset-focus-connector-reverse, svg polyline.asset-focus-connector-reverse {{ animation-name: focus-dash-flow-reverse; }}
     svg polygon.asset-focus-connector {{ fill: #1d4ed8 !important; opacity: .95; filter: drop-shadow(0 0 2px rgba(255,255,255,.95)); animation: focus-arrow-pulse 1.1s ease-in-out infinite; }}
     svg .asset-focus-match {{ fill: #111827; stroke: none; font-weight: 800; }}
+    svg .diagram-note-panel {{ opacity: 0; pointer-events: none; transition: opacity .12s ease; }}
+    svg .diagram-note-hover .diagram-note-panel, svg .diagram-note-hotspot:hover .diagram-note-panel {{ opacity: 1; pointer-events: auto; }}
     svg .diagram-note-box {{ fill: #f8fafc; stroke: #2563eb; stroke-width: 1.8px; rx: 6px; ry: 6px; filter: drop-shadow(0 2px 4px rgba(15,23,42,.22)); }}
     svg .diagram-note-text {{ fill: #111827; font: 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; pointer-events: none; }}
     svg .diagram-note-link {{ fill: none; stroke: #64748b; stroke-width: 1.6px; opacity: .86; filter: drop-shadow(0 0 2px rgba(255,255,255,.95)); }}
+    svg .diagram-note-marker {{ fill: #eff6ff; stroke: #2563eb; stroke-width: 1.8px; filter: drop-shadow(0 1px 2px rgba(15,23,42,.2)); }}
+    svg .diagram-note-marker-text {{ fill: #1d4ed8; font: 700 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; text-anchor: middle; dominant-baseline: central; pointer-events: none; }}
     svg .diagram-note-hotspot {{ cursor: pointer; }}
     svg .diagram-note-hover .diagram-note-box, svg .diagram-note-hotspot:hover .diagram-note-box {{ fill: #dbeafe; stroke: #1d4ed8; stroke-width: 2.4px; }}
+    svg .diagram-note-hover .diagram-note-marker, svg .diagram-note-hotspot:hover .diagram-note-marker {{ fill: #dbeafe; stroke: #1d4ed8; stroke-width: 2.4px; }}
     svg .diagram-note-hover .diagram-note-link, svg .diagram-note-hotspot:hover .diagram-note-link {{ stroke: #1d4ed8; stroke-width: 2.1px; opacity: 1; }}
     svg .diagram-note-hover .diagram-note-text, svg .diagram-note-hotspot:hover .diagram-note-text {{ fill: #1e3a8a; }}
+    svg .diagram-code-link-target {{ cursor: pointer; fill: #047857 !important; text-decoration: underline; text-decoration-thickness: 1.5px; }}
+    svg .diagram-code-link-connector {{ cursor: pointer; stroke: #047857 !important; stroke-width: 2.6px !important; opacity: .96; }}
+    svg polygon.diagram-code-link-connector {{ fill: #047857 !important; }}
+    svg .diagram-code-link-hit-area {{ cursor: pointer; fill: rgba(29,78,216,.01) !important; stroke: rgba(29,78,216,.01) !important; stroke-width: 1px !important; opacity: .01; pointer-events: all; }}
+    svg .diagram-code-link-hover {{ stroke: #1d4ed8 !important; fill: #1d4ed8 !important; opacity: 1 !important; filter: drop-shadow(0 0 2px rgba(255,255,255,.95)); }}
+    svg text.diagram-code-link-hover, svg tspan.diagram-code-link-hover {{ fill: #1e3a8a !important; stroke: none !important; font-weight: 800; }}
+    svg .diagram-code-link-hit-area.diagram-code-link-hover {{ stroke: rgba(29,78,216,.01) !important; fill: rgba(29,78,216,.01) !important; opacity: .01 !important; filter: none; }}
+    svg .diagram-code-link-active {{ filter: drop-shadow(0 0 3px rgba(4,120,87,.65)); }}
+    svg .asset-focus-connector.diagram-code-link-connector {{ stroke: #1d4ed8 !important; stroke-width: 3px !important; opacity: .95; }}
+    svg polygon.asset-focus-connector.diagram-code-link-connector {{ fill: #1d4ed8 !important; }}
+    svg text.asset-focus-match.diagram-code-link-target, svg tspan.asset-focus-match.diagram-code-link-target {{ fill: #1e3a8a !important; stroke: none !important; font-weight: 800; }}
     svg .asset-focus-related-hover {{ stroke: #1d4ed8 !important; fill: #1d4ed8 !important; opacity: 1 !important; filter: drop-shadow(0 0 2px rgba(255,255,255,.95)); }}
     svg text.asset-focus-related-hover, svg tspan.asset-focus-related-hover {{ fill: #1e3a8a !important; stroke: none !important; }}
     svg .asset-search-match {{ fill: #cf222e; stroke: #cf222e; font-weight: 700; }}
@@ -1035,10 +1242,15 @@ def _diagram_script() -> str:
   const zoomLabel = document.getElementById("diagram-zoom-label");
   const searchInput = document.getElementById("diagram-search");
   const searchCount = document.getElementById("diagram-search-count");
+  const generalViewButton = document.getElementById("diagram-general-view");
   const zoomTools = Array.from(document.querySelectorAll("[data-diagram-zoom-tool]"));
   let scale = 1;
   let mode = "";
   let activeFocusTerms = [];
+  let activeNotes = [];
+  let activeCodeLinks = [];
+  let activeCodeLinkHoverInstance = "";
+  let activeCodeLinkHoverTarget = "";
   let searchMatches = [];
   let searchIndex = -1;
   let isPanning = false;
@@ -1085,6 +1297,7 @@ def _diagram_script() -> str:
 
   function clearFocus() {
     activeFocusTerms = [];
+    activeNotes = [];
     for (const node of content.querySelectorAll(".diagram-note-layer")) {
       node.remove();
     }
@@ -1100,8 +1313,19 @@ def _diagram_script() -> str:
     for (const node of content.querySelectorAll(".asset-focus-related-hover")) {
       node.classList.remove("asset-focus-related-hover");
     }
+    for (const node of content.querySelectorAll(".diagram-code-link-hover")) {
+      node.classList.remove("diagram-code-link-hover");
+    }
+    activeCodeLinkHoverInstance = "";
+    activeCodeLinkHoverTarget = "";
+    for (const node of content.querySelectorAll(".diagram-code-link-hit-area")) {
+      node.remove();
+    }
     if (mode === "log") {
       renderLogView(searchInput ? searchInput.value : "", activeFocusTerms);
+    }
+    if (generalViewButton) {
+      generalViewButton.hidden = true;
     }
   }
 
@@ -1152,6 +1376,9 @@ def _diagram_script() -> str:
 
   function isSvgConnector(node) {
     if (!node || !node.tagName) {
+      return false;
+    }
+    if (node.classList && node.classList.contains("diagram-code-link-hit-area")) {
       return false;
     }
     const tag = node.tagName.toLowerCase();
@@ -1278,7 +1505,7 @@ def _diagram_script() -> str:
 
   function searchDiagram(query) {
     const lowerQuery = query.toLowerCase();
-    const textNodes = content.querySelectorAll("svg text, svg tspan");
+    const textNodes = content.querySelectorAll("svg text");
     for (const node of textNodes) {
       if (node.textContent.toLowerCase().includes(lowerQuery)) {
         node.classList.add("asset-search-match");
@@ -1352,9 +1579,25 @@ def _diagram_script() -> str:
     }
   }
 
+  function parseCodeLinks(value) {
+    if (!value) {
+      return [];
+    }
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (error) {
+      return [];
+    }
+  }
+
   function applyFocusTerms(terms, notes) {
     clearFocus();
     activeFocusTerms = terms;
+    activeNotes = notes || [];
+    if (generalViewButton) {
+      generalViewButton.hidden = !(activeFocusTerms.length || activeNotes.length);
+    }
     if (mode === "diagram") {
       const focused = [];
       const textNodes = content.querySelectorAll("svg text, svg tspan");
@@ -1379,6 +1622,370 @@ def _diagram_script() -> str:
         firstLine.scrollIntoView({ block: "center", inline: "nearest" });
       }
     }
+  }
+
+  function applyCodeLinks(links) {
+    activeCodeLinks = links || [];
+    closeCodePopover();
+    activeCodeLinkHoverInstance = "";
+    activeCodeLinkHoverTarget = "";
+    for (const node of content.querySelectorAll(".diagram-code-link-hit-area")) {
+      node.remove();
+    }
+    for (const node of content.querySelectorAll(".diagram-code-link-target, .diagram-code-link-connector, .diagram-code-link-hover, .diagram-code-link-active")) {
+      node.classList.remove("diagram-code-link-target", "diagram-code-link-connector", "diagram-code-link-hover", "diagram-code-link-active");
+      delete node.dataset.codeLinkTarget;
+      delete node.dataset.codeLinkInstance;
+    }
+    if (mode !== "diagram" || !activeCodeLinks.length) {
+      return;
+    }
+    const textNodes = content.querySelectorAll("svg text, svg tspan");
+    let instanceIndex = 0;
+    for (const link of activeCodeLinks) {
+      const target = String(link.target || "").toLowerCase();
+      if (!target) {
+        continue;
+      }
+      for (const node of textNodes) {
+        if (!node.textContent.toLowerCase().includes(target)) {
+          continue;
+        }
+        decorateCodeLinkTarget(node, link, "code-link-" + String(instanceIndex));
+        instanceIndex += 1;
+      }
+    }
+  }
+
+  function decorateCodeLinkTarget(node, link, instanceKey) {
+    node = codeLinkLabelNode(node);
+    const targetKey = String(link.target || "");
+    const connectors = connectorsForText(node);
+    node.classList.add("diagram-code-link-target");
+    node.dataset.codeLinkTarget = targetKey;
+    node.dataset.codeLinkInstance = instanceKey;
+    node.addEventListener("click", function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      activateCodeLink(targetKey, instanceKey);
+    });
+    attachCodeLinkHover(node, targetKey, instanceKey);
+    for (const connector of connectors) {
+      connector.classList.add("diagram-code-link-connector");
+      connector.dataset.codeLinkTarget = targetKey;
+      connector.dataset.codeLinkInstance = instanceKey;
+      connector.addEventListener("click", function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        activateCodeLink(targetKey, instanceKey);
+      });
+      attachCodeLinkHover(connector, targetKey, instanceKey);
+    }
+    addCodeLinkHitArea(node, connectors, targetKey, instanceKey);
+  }
+
+  function codeLinkLabelNode(node) {
+    if (node && node.tagName && node.tagName.toLowerCase() === "tspan" && node.parentElement) {
+      return node.parentElement;
+    }
+    return node;
+  }
+
+  function attachCodeLinkHover(node, targetKey, instanceKey) {
+    node.dataset.codeLinkTarget = targetKey;
+    node.dataset.codeLinkInstance = instanceKey;
+  }
+
+  function setCodeLinkHover(targetKey, instanceKey, enabled) {
+    for (const node of content.querySelectorAll("[data-code-link-instance]")) {
+      if (node.dataset.codeLinkInstance === instanceKey) {
+        node.classList.toggle("diagram-code-link-hover", enabled);
+      }
+    }
+    setDiagramNoteHoverForTarget(targetKey, enabled);
+  }
+
+  function updateCodeLinkHoverFromPointer(event) {
+    if (modal.hidden || mode !== "diagram") {
+      clearCodeLinkHover();
+      return;
+    }
+    const pointerTarget = document.elementFromPoint(event.clientX, event.clientY);
+    const item = pointerTarget ? pointerTarget.closest("[data-code-link-instance]") : null;
+    if (!item || !content.contains(item)) {
+      clearCodeLinkHover();
+      return;
+    }
+    const instanceKey = item.dataset.codeLinkInstance || "";
+    const targetKey = item.dataset.codeLinkTarget || "";
+    if (!instanceKey || instanceKey === activeCodeLinkHoverInstance) {
+      return;
+    }
+    clearCodeLinkHover();
+    activeCodeLinkHoverInstance = instanceKey;
+    activeCodeLinkHoverTarget = targetKey;
+    setCodeLinkHover(targetKey, instanceKey, true);
+  }
+
+  function clearCodeLinkHover() {
+    if (!activeCodeLinkHoverInstance) {
+      return;
+    }
+    setCodeLinkHover(activeCodeLinkHoverTarget, activeCodeLinkHoverInstance, false);
+    activeCodeLinkHoverInstance = "";
+    activeCodeLinkHoverTarget = "";
+  }
+
+  function setDiagramNoteHoverForTarget(targetKey, enabled) {
+    const normalizedTarget = String(targetKey || "").toLowerCase();
+    if (!normalizedTarget) {
+      return;
+    }
+    for (const note of content.querySelectorAll("[data-diagram-note-target]")) {
+      const noteTarget = String(note.dataset.diagramNoteTarget || "").toLowerCase();
+      if (noteTarget && (normalizedTarget.includes(noteTarget) || noteTarget.includes(normalizedTarget))) {
+        note.classList.toggle("diagram-note-hover", enabled);
+      }
+    }
+  }
+
+  function addCodeLinkHitArea(labelNode, connectors, targetKey, instanceKey) {
+    const svg = labelNode.ownerSVGElement;
+    const box = combinedSvgBox([labelNode].concat(connectors));
+    if (!svg || !box) {
+      return;
+    }
+    const paddingX = 2;
+    const paddingY = 3;
+    const hitArea = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+    hitArea.setAttribute("class", "diagram-code-link-hit-area");
+    hitArea.setAttribute("x", String(box.x - paddingX));
+    hitArea.setAttribute("y", String(box.y - paddingY));
+    hitArea.setAttribute("width", String(box.width + paddingX * 2));
+    hitArea.setAttribute("height", String(box.height + paddingY * 2));
+    hitArea.setAttribute("rx", "3");
+    hitArea.setAttribute("ry", "3");
+    hitArea.dataset.codeLinkTarget = targetKey;
+    hitArea.dataset.codeLinkInstance = instanceKey;
+    hitArea.addEventListener("click", function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      activateCodeLink(targetKey, instanceKey);
+    });
+    attachCodeLinkHover(hitArea, targetKey, instanceKey);
+    const parent = labelNode.parentNode || svg;
+    parent.insertBefore(hitArea, firstSvgSibling([labelNode].concat(connectors), parent));
+  }
+
+  function firstSvgSibling(nodes, parent) {
+    const siblings = nodes.filter(function (node) {
+      return node && node.parentNode === parent;
+    });
+    if (!siblings.length) {
+      return parent.firstChild;
+    }
+    return siblings.reduce(function (first, node) {
+      if (!first) {
+        return node;
+      }
+      return first.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_PRECEDING ? node : first;
+    }, null);
+  }
+
+  function combinedSvgBox(nodes) {
+    let result = null;
+    for (const node of nodes) {
+      const box = safeBBox(node);
+      if (!box) {
+        continue;
+      }
+      if (!result) {
+        result = { x: box.x, y: box.y, width: box.width, height: box.height };
+        continue;
+      }
+      const minX = Math.min(result.x, box.x);
+      const minY = Math.min(result.y, box.y);
+      const maxX = Math.max(result.x + result.width, box.x + box.width);
+      const maxY = Math.max(result.y + result.height, box.y + box.height);
+      result = { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+    }
+    return result;
+  }
+
+  function activateCodeLink(targetKey, instanceKey) {
+    const links = activeCodeLinks.filter(function (link) {
+      return String(link.target || "") === String(targetKey || "");
+    });
+    if (!links.length) {
+      return;
+    }
+    markActiveCodeLink(instanceKey);
+    renderCodePopover(targetKey, links);
+  }
+
+  function markActiveCodeLink(instanceKey) {
+    for (const node of content.querySelectorAll(".diagram-code-link-active")) {
+      node.classList.remove("diagram-code-link-active");
+    }
+    for (const node of content.querySelectorAll("[data-code-link-instance]")) {
+      if (node.dataset.codeLinkInstance === instanceKey) {
+        node.classList.add("diagram-code-link-active");
+      }
+    }
+  }
+
+  function closeCodePopover() {
+    const overlay = content.querySelector(".diagram-code-overlay");
+    if (overlay) {
+      overlay.remove();
+    }
+    for (const node of content.querySelectorAll(".diagram-code-link-active")) {
+      node.classList.remove("diagram-code-link-active");
+    }
+    for (const node of content.querySelectorAll(".diagram-code-link-hover")) {
+      node.classList.remove("diagram-code-link-hover");
+    }
+    activeCodeLinkHoverInstance = "";
+    activeCodeLinkHoverTarget = "";
+  }
+
+  function renderCodePopover(targetKey, links) {
+    closeExistingCodePopoverOnly();
+    const overlay = document.createElement("div");
+    overlay.className = "diagram-code-overlay";
+    overlay.style.top = content.scrollTop + "px";
+    overlay.style.left = content.scrollLeft + "px";
+    overlay.style.width = content.clientWidth + "px";
+    overlay.style.height = content.clientHeight + "px";
+    overlay.addEventListener("click", function (event) {
+      if (event.target === overlay) {
+        closeCodePopover();
+      }
+    });
+    const popover = document.createElement("section");
+    popover.className = "diagram-code-popover";
+    popover.setAttribute("aria-label", "Code linked from diagram");
+    popover.addEventListener("click", function (event) {
+      event.stopPropagation();
+    });
+    const header = document.createElement("div");
+    header.className = "diagram-code-popover-header";
+    const heading = document.createElement("span");
+    heading.className = "diagram-code-popover-title";
+    heading.textContent = targetKey;
+    header.appendChild(heading);
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "diagram-code-popover-close";
+    close.setAttribute("aria-label", "Close linked code");
+    close.textContent = "×";
+    close.addEventListener("click", closeCodePopover);
+    header.appendChild(close);
+    popover.appendChild(header);
+    const body = document.createElement("div");
+    body.className = "diagram-code-popover-body";
+    for (const link of links) {
+      body.appendChild(createCodeLinkItem(link));
+    }
+    popover.appendChild(body);
+    overlay.appendChild(popover);
+    content.appendChild(overlay);
+    requestAnimationFrame(function () {
+      requestAnimationFrame(function () {
+        centerCodeTarget(popover);
+      });
+    });
+  }
+
+  function centerCodeTarget(popover) {
+    const firstTarget = popover.querySelector(".diagram-code-target-line");
+    if (!firstTarget) {
+      return;
+    }
+    const codeBox = firstTarget.closest(".diagram-code-link-code");
+    if (!codeBox) {
+      return;
+    }
+    const codeBoxRect = codeBox.getBoundingClientRect();
+    const targetRect = firstTarget.getBoundingClientRect();
+    const targetMiddle = (
+      codeBox.scrollTop
+      + targetRect.top
+      - codeBoxRect.top
+      + targetRect.height / 2
+    );
+    const maxScroll = Math.max(0, codeBox.scrollHeight - codeBox.clientHeight);
+    codeBox.scrollTop = Math.min(maxScroll, Math.max(0, targetMiddle - codeBox.clientHeight / 2));
+  }
+
+  function closeExistingCodePopoverOnly() {
+    const overlay = content.querySelector(".diagram-code-overlay");
+    if (overlay) {
+      overlay.remove();
+    }
+  }
+
+  function createCodeLinkItem(link) {
+    const item = document.createElement("div");
+    item.className = "diagram-code-link-item";
+    const titleNode = document.createElement("span");
+    titleNode.className = "diagram-code-link-title";
+    titleNode.textContent = String(link.title || link.target || "Code");
+    item.appendChild(titleNode);
+    const location = document.createElement("span");
+    location.className = "diagram-code-link-location";
+    location.textContent = String(link.file || "") + ":" + String(link.line || "");
+    item.appendChild(location);
+    const code = document.createElement("code");
+    code.className = "diagram-code-link-code";
+    renderDiffFileContext(code, link);
+    item.appendChild(code);
+    return item;
+  }
+
+  function renderDiffFileContext(parent, link) {
+    const rows = diffFileRowsForLink(link);
+    if (!rows.length) {
+      parent.textContent = "Target file is not present in this rendered diff.";
+      return;
+    }
+    const targetRange = targetRangeForLink(link);
+    const targetLine = Number(link.line);
+    rows.forEach(function (row, index) {
+      const line = Number(row.dataset.newLine || 0);
+      const span = document.createElement("span");
+      span.className = "diagram-code-line";
+      if (targetRange && line >= targetRange.start && line <= targetRange.end) {
+        span.classList.add("diagram-code-context-line");
+      }
+      if (Number.isFinite(targetLine) && line === targetLine) {
+        span.classList.add("diagram-code-target-line");
+      }
+      const newLine = row.dataset.newLine || "";
+      const code = row.querySelector(".code");
+      span.textContent = String(newLine).padStart(5, " ") + "  " + (code ? code.textContent : "");
+      parent.appendChild(span);
+    });
+  }
+
+  function diffFileRowsForLink(link) {
+    const filePath = String(link.file || "");
+    if (!filePath) {
+      return [];
+    }
+    return Array.from(document.querySelectorAll("tr[data-file]")).filter(function (row) {
+      return row.dataset.file === filePath && row.dataset.newLine;
+    });
+  }
+
+  function targetRangeForLink(link) {
+    const filePath = String(link.file || "");
+    const startLine = Number((link.range && link.range.start) || link.line);
+    const endLine = Number((link.range && link.range.end) || link.line);
+    if (!filePath || !Number.isFinite(startLine) || !Number.isFinite(endLine)) {
+      return null;
+    }
+    return { start: Math.min(startLine, endLine), end: Math.max(startLine, endLine) };
   }
 
   function isDiagramNoteTarget(node, notes) {
@@ -1411,16 +2018,57 @@ def _diagram_script() -> str:
       if (!targetBox) {
         return;
       }
-      const noteWidth = Math.min(260, Math.max(150, String(note.text || "").length * 6.4 + 24));
-      const noteHeight = 44;
-      const x = Number.isFinite(note.x) ? Number(note.x) : viewBox.x + viewBox.width - noteWidth - 24;
-      const y = Number.isFinite(note.y) ? Number(note.y) : Math.max(viewBox.y + 24, targetBox.y + targetBox.height / 2 - noteHeight / 2 + index * 4);
+      const noteWidth = Math.min(320, Math.max(180, String(note.text || "").length * 4.2 + 24));
+      const noteLines = estimateSvgTextLines(String(note.text || ""), noteWidth - 20);
+      const noteHeight = Math.max(44, 18 + noteLines * 15);
       const connectors = connectorsForText(target);
       const anchor = labelRightAnchor(targetBox);
-      const group = createDiagramNote(note, x, y, noteWidth, noteHeight, anchor, connectors.concat([target]));
+      const marker = diagramNoteMarkerPosition(viewBox, anchor);
+      const position = diagramNotePosition(note, viewBox, marker, noteWidth, noteHeight, index);
+      const x = position.x;
+      const y = position.y;
+      const group = createDiagramNote(note, x, y, noteWidth, noteHeight, marker, connectors.concat([target]));
       layer.appendChild(group);
       raiseFocusTarget(target, connectors);
     });
+  }
+
+  function diagramNoteMarkerPosition(viewBox, anchor) {
+    const margin = 18;
+    return {
+      x: clamp(anchor.x + 18, viewBox.x + margin, viewBox.x + viewBox.width - margin),
+      y: clamp(anchor.y, viewBox.y + margin, viewBox.y + viewBox.height - margin),
+    };
+  }
+
+  function diagramNotePosition(note, viewBox, marker, width, height, index) {
+    const margin = 24;
+    const maxXOffset = 360;
+    const maxYOffset = 220;
+    const minX = viewBox.x + margin;
+    const maxX = viewBox.x + viewBox.width - width - margin;
+    const minY = viewBox.y + margin;
+    const maxY = viewBox.y + viewBox.height - height - margin;
+    if (Number.isFinite(note.x) && Number.isFinite(note.y)) {
+      return {
+        x: clamp(Number(note.x), minX, maxX),
+        y: clamp(Number(note.y), minY, maxY),
+      };
+    }
+    const rightX = clamp(marker.x + 30, minX, Math.min(maxX, marker.x + maxXOffset));
+    const leftX = clamp(marker.x - width - 30, Math.max(minX, marker.x - maxXOffset), maxX);
+    const hasRoomRight = rightX >= marker.x + 18;
+    const x = hasRoomRight ? rightX : leftX;
+    const idealY = marker.y - height / 2 + index * 4;
+    const y = clamp(idealY, Math.max(minY, marker.y - maxYOffset), Math.min(maxY, marker.y + maxYOffset));
+    return { x, y };
+  }
+
+  function clamp(value, min, max) {
+    if (max < min) {
+      return min;
+    }
+    return Math.min(max, Math.max(min, value));
   }
 
   function findNoteTarget(textNodes, targetText) {
@@ -1440,29 +2088,47 @@ def _diagram_script() -> str:
     };
   }
 
-  function createDiagramNote(note, x, y, width, height, anchor, relatedNodes) {
+  function createDiagramNote(note, x, y, width, height, markerPoint, relatedNodes) {
     const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
     group.setAttribute("class", "diagram-note-hotspot");
+    group.dataset.diagramNoteTarget = String(note.target || "");
     for (const eventName of ["click", "dblclick", "mousedown", "pointerdown"]) {
       group.addEventListener(eventName, stopDiagramNoteEvent);
     }
+    const markerX = markerPoint.x;
+    const markerY = markerPoint.y;
+    const marker = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    marker.setAttribute("class", "diagram-note-marker");
+    marker.setAttribute("cx", String(markerX));
+    marker.setAttribute("cy", String(markerY));
+    marker.setAttribute("r", "9");
+    group.appendChild(marker);
+    const markerText = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    markerText.setAttribute("class", "diagram-note-marker-text");
+    markerText.setAttribute("x", String(markerX));
+    markerText.setAttribute("y", String(markerY + 0.5));
+    markerText.textContent = "i";
+    group.appendChild(markerText);
+    const panel = document.createElementNS("http://www.w3.org/2000/svg", "g");
+    panel.setAttribute("class", "diagram-note-panel");
     const link = document.createElementNS("http://www.w3.org/2000/svg", "path");
     link.setAttribute("class", "diagram-note-link");
-    link.setAttribute("d", noteLinkPath(anchor.x, anchor.y, x, y + height / 2));
-    group.appendChild(link);
+    link.setAttribute("d", noteLinkPath(markerX, markerY, x, y + height / 2));
+    panel.appendChild(link);
     const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
     rect.setAttribute("class", "diagram-note-box");
     rect.setAttribute("x", String(x));
     rect.setAttribute("y", String(y));
     rect.setAttribute("width", String(width));
     rect.setAttribute("height", String(height));
-    group.appendChild(rect);
+    panel.appendChild(rect);
     const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
     text.setAttribute("class", "diagram-note-text");
     text.setAttribute("x", String(x + 10));
     text.setAttribute("y", String(y + 18));
-    wrapSvgText(text, String(note.text || ""), width - 20, 2);
-    group.appendChild(text);
+    wrapSvgText(text, String(note.text || ""), width - 20);
+    panel.appendChild(text);
+    group.appendChild(panel);
     group.addEventListener("mouseenter", function () {
       group.classList.add("diagram-note-hover");
       for (const node of relatedNodes) {
@@ -1534,7 +2200,23 @@ def _diagram_script() -> str:
     ].join(" ");
   }
 
-  function wrapSvgText(textNode, text, maxWidth, maxLines) {
+  function estimateSvgTextLines(text, maxWidth) {
+    const words = text.split(/\\s+/).filter(Boolean);
+    let line = "";
+    let lines = 0;
+    for (const word of words) {
+      const next = line ? line + " " + word : word;
+      if (next.length * 6.4 > maxWidth && line) {
+        lines += 1;
+        line = word;
+      } else {
+        line = next;
+      }
+    }
+    return lines + (line ? 1 : 0);
+  }
+
+  function wrapSvgText(textNode, text, maxWidth) {
     const words = text.split(/\\s+/);
     let line = "";
     let lineNo = 0;
@@ -1544,14 +2226,11 @@ def _diagram_script() -> str:
         appendTspan(textNode, line, lineNo);
         line = word;
         lineNo += 1;
-        if (lineNo >= maxLines) {
-          break;
-        }
       } else {
         line = next;
       }
     }
-    if (line && lineNo < maxLines) {
+    if (line) {
       appendTspan(textNode, line, lineNo);
     }
   }
@@ -1615,6 +2294,7 @@ def _diagram_script() -> str:
     }
     setScale(1);
     applyFocusTerms(focusTerms || [], notes || []);
+    applyCodeLinks(nextMode === "diagram" ? parseCodeLinks(template.dataset.codeLinks) : []);
     if (nextMode === "log" && searchInput) {
       searchInput.focus();
     }
@@ -1635,6 +2315,9 @@ def _diagram_script() -> str:
     scale = 1;
     setMode("");
     activeFocusTerms = [];
+    activeNotes = [];
+    activeCodeLinks = [];
+    closeCodePopover();
     clearSearch();
   }
 
@@ -1668,6 +2351,16 @@ def _diagram_script() -> str:
     const search = event.target.closest("[data-diagram-search]");
     if (search) {
       moveSearch(search.dataset.diagramSearch === "prev" ? -1 : 1);
+      return;
+    }
+    if (event.target.closest("[data-diagram-general]")) {
+      closeCodePopover();
+      applyFocusTerms([], []);
+      return;
+    }
+    if (event.target.closest(".diagram-code-popover")) {
+      event.stopPropagation();
+      return;
     }
   });
 
@@ -1689,7 +2382,25 @@ def _diagram_script() -> str:
       return;
     }
     if (event.key === "Escape") {
+      if (content.querySelector(".diagram-code-overlay")) {
+        closeCodePopover();
+        return;
+      }
       closeDiagram();
+    }
+  });
+
+  document.addEventListener("pointermove", function (event) {
+    updateCodeLinkHoverFromPointer(event);
+  });
+
+  document.addEventListener("pointerleave", function () {
+    clearCodeLinkHover();
+  });
+
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) {
+      clearCodeLinkHover();
     }
   });
 
@@ -1700,6 +2411,7 @@ def _diagram_script() -> str:
   }
 
   content.addEventListener("wheel", function (event) {
+    clearCodeLinkHover();
     if (!event.ctrlKey || modal.hidden || mode !== "diagram") {
       return;
     }
@@ -1715,6 +2427,10 @@ def _diagram_script() -> str:
     if (event.target.closest("button, input")) {
       return;
     }
+    if (event.target.closest(".diagram-code-link-target, .diagram-code-link-connector, .diagram-code-link-hit-area, .diagram-note-hotspot, .diagram-code-overlay")) {
+      return;
+    }
+    clearCodeLinkHover();
     isPanning = true;
     panStartX = event.clientX;
     panStartY = event.clientY;
@@ -1902,6 +2618,10 @@ def _anchor(value: str) -> str:
 
 def _comment_anchor(file_path: str, line: int) -> str:
     return f"comment-{_anchor(file_path)}-{line}"
+
+
+def _line_anchor(file_path: str, line: int) -> str:
+    return f"line-{_anchor(file_path)}-{line}"
 
 
 def _esc(value: object) -> str:
