@@ -1395,11 +1395,13 @@ def _render_diagram_preview(
     focus_attr = _focus_attr("data-diagram-focus", focus_terms)
     notes_attr = _json_attr("data-diagram-notes", notes)
     preview_src = _svg_data_uri(diagram.svg)
+    dark_preview_src = _svg_data_uri(_dark_preview_svg(diagram.svg))
     return (
         '<button type="button" class="diagram-preview" '
         f'data-diagram-id="{_esc(safe_id)}"{focus_attr}{notes_attr} aria-label="Open diagram: {_esc(diagram.title)}">'
         f'<span class="diagram-preview-title">{_esc(diagram.title)}</span>'
-        f'<span class="diagram-preview-canvas"><img src="{_esc(preview_src)}" alt=""></span>'
+        f'<span class="diagram-preview-canvas"><img class="diagram-preview-img-light" src="{_esc(preview_src)}" alt="">'
+        f'<img class="diagram-preview-img-dark" src="{_esc(dark_preview_src)}" alt=""></span>'
         "</button>\n"
     )
 
@@ -1407,6 +1409,22 @@ def _render_diagram_preview(
 def _svg_data_uri(svg: str) -> str:
     encoded = base64.b64encode(svg.encode("utf-8")).decode("ascii")
     return f"data:image/svg+xml;base64,{encoded}"
+
+
+def _dark_preview_svg(svg: str) -> str:
+    style = """
+<style>
+svg text:not(.diagram-note-text):not(.diagram-note-marker-text):not(.diagram-code-link-badge-text):not(.asset-focus-match):not(.asset-focus-related-hover),
+svg tspan:not(.diagram-note-text):not(.diagram-note-marker-text):not(.asset-focus-match):not(.asset-focus-related-hover) { fill: #d4d4d4 !important; }
+svg line:not(.asset-focus-connector):not(.diagram-code-link-connector):not(.diagram-note-link),
+svg path:not(.diagram-note-box):not(.diagram-note-link),
+svg polyline:not(.asset-focus-connector):not(.diagram-code-link-connector) { stroke: #c5c5c5 !important; }
+svg polygon:not(.asset-focus-connector):not(.diagram-code-link-connector) { fill: #c5c5c5 !important; stroke: #c5c5c5 !important; }
+svg rect:not(.diagram-note-box):not(.diagram-code-link-badge-box) { fill: #252526 !important; stroke: #c5c5c5 !important; }
+svg path[fill="#FBFB77"] { fill: #3a3217 !important; stroke: #cca700 !important; }
+</style>
+"""
+    return re.sub(r"(<svg\b[^>]*>)", r"\1" + style, svg, count=1, flags=re.IGNORECASE)
 
 
 def _render_log_preview(log: LogAttachment, focus_terms: tuple[str, ...] = ()) -> str:
@@ -1778,6 +1796,9 @@ def _html_header(title: str) -> str:
     .diagram-preview-title {{ display: block; padding: 7px 9px; border-bottom: 1px solid var(--border); background: var(--header-bg); font-weight: 700; }}
     .diagram-preview-canvas {{ display: flex; align-items: center; justify-content: center; height: 180px; padding: 10px; overflow: hidden; background: var(--diagram-bg); }}
     .diagram-preview-canvas img {{ display: block; max-width: 100%; max-height: 100%; width: auto; height: auto; }}
+    .diagram-preview-img-dark {{ display: none !important; }}
+    :root[data-theme="dark"] .diagram-preview-img-light {{ display: none !important; }}
+    :root[data-theme="dark"] .diagram-preview-img-dark {{ display: block !important; }}
     .diagram-preview-canvas svg {{ max-width: 100%; max-height: 100%; width: auto; height: auto; filter: var(--diagram-svg-filter); }}
     .log-preview {{ cursor: pointer; }}
     .log-preview-text {{ max-width: 100%; height: 180px; margin: 0; padding: 10px; overflow: hidden; background: #0d1117; color: #e6edf3; font: 18px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; text-align: left; }}
