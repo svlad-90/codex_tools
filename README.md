@@ -59,6 +59,13 @@ Current rule files:
   editing, or validating Python code.
 - `cpp-code.md` - use `python -m codex_tools.cpp_code_map` when inspecting,
   editing, or validating C and C++ code.
+- `reusable-environments.md` - keep reusable container environments under
+  `codex_tools/environments/` and task-specific runtime material under the
+  task directory.
+- `findings.md` - write review findings with clear severity, references, and
+  actionable explanation.
+- `diff-reports.md` - keep diff review artifacts consistent, self-contained,
+  and evidence-led when validation artifacts matter.
 - `git-commits.md` - keep commit messages wrapped and include the required
   `Signed-off-by` trailer.
 
@@ -102,11 +109,15 @@ GitHub-style HTML diff review report generation. Review artifacts should live
 under a task's `report/diff/` directory, including the source diff, comments
 JSON, and generated HTML.
 
+Reports can include file-level comments, inline comments, guided story steps,
+diagram and log previews, diagram-to-code links, and evidence-led
+`Reviewer Summary` sections that interleave prose with diagram or log previews.
+
 Typical command:
 
 ```sh
 python -m codex_tools.diff_report \
-  --diff report/diff/changes.diff \
+  --diff-file report/diff/changes.diff \
   --comments report/diff/comments.json \
   --output report/diff/review.html
 ```

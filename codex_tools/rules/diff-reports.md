@@ -131,3 +131,26 @@ directories.
     active step visible, and scroll to code/comment targets. Supporting
     diagrams and logs should remain attached to the relevant comments rather
     than being opened from the story controls.
+14. Reviewer summaries may interleave explanatory prose with proof artifacts.
+    Use top-level `summary_blocks` when the summary needs to cite diagrams,
+    logs, or other embedded evidence instead of only plain text. Keep the old
+    top-level `summary` for backward-compatible short prose, but prefer
+    `summary_blocks` for evidence-led summaries:
+
+    ```json
+    {
+      "summary_blocks": [
+        {"type": "text", "body": "What changed and why the evidence below matters."},
+        {"type": "diagram", "diagram": "after-flow", "diagram_focus": ["registered selector"]},
+        {"type": "text", "body": "What the runtime proof demonstrates."},
+        {"type": "log", "log": "runtime", "log_focus": ["PASS"]}
+      ]
+    }
+    ```
+
+    Summary artifact previews should behave like the same artifacts attached to
+    file-level or inline comments: clicking a diagram opens the diagram modal,
+    clicking a log opens the log modal, and any focus fields apply only to that
+    preview. Use this format for validation evidence such as build logs,
+    runtime logs, trace captures, and diagrams that explain why the observed
+    result proves the reviewed change works.
